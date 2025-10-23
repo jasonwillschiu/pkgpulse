@@ -1,4 +1,4 @@
-# Contributing to pkgpulse-com
+# Contributing to pkgpulse
 
 Contributions are welcome via pull requests.
 
@@ -50,7 +50,7 @@ Reviews may include questions or requests for changes. Pull requests will be mer
 ## Project Structure
 
 ```
-pkgpulse-com/
+pkgpulse/
 ├── main.go              # Main CLI - keep it simple & single-file
 ├── tools/release-tool/  # Separate Go module for versioning
 ├── README.md            # User docs

@@ -1,4 +1,4 @@
-# pkgpulse-com
+# pkgpulse
 
 A CLI tool for analyzing and comparing container image sizes and package contents using SBOM (Software Bill of Materials) data. Ideal for evaluating small production images like distroless, minimal base images, and micro containers.
 
@@ -47,10 +47,10 @@ Requires Go 1.21+ and syft installed:
 brew install syft
 
 # Install pkgpulse
-go install github.com/jasonwillschiu/pkgpulse-com@latest
+go install github.com/jasonwillschiu/pkgpulse@latest
 ```
 
-The binary will be installed to `~/go/bin/pkgpulse-com` (ensure `~/go/bin` is in your `$PATH`).
+The binary will be installed to `~/go/bin/pkgpulse` (ensure `~/go/bin` is in your `$PATH`).
 
 To update to the latest version, run the same command again.
 
@@ -58,8 +58,8 @@ To update to the latest version, run the same command again.
 
 ```bash
 # Clone the repository
-git clone https://github.com/jasonwillschiu/pkgpulse-com
-cd pkgpulse-com
+git clone https://github.com/jasonwillschiu/pkgpulse
+cd pkgpulse
 
 # Install Go dependencies
 go mod download
@@ -77,26 +77,32 @@ sudo mv pkgpulse /usr/local/bin/
 
 Analyze a single image:
 ```bash
-go run main.go cgr.dev/chainguard/wolfi-base
+pkgpulse cgr.dev/chainguard/wolfi-base
 ```
 
 Compare multiple images:
 ```bash
-go run main.go cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
+pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
 ```
 
 ### CSV Export
 
 Export package data to CSV:
 ```bash
-go run main.go alpine:latest --csv packages.csv
+pkgpulse alpine:latest --csv packages.csv
 ```
 
 ### Using the Built Binary
 
 ```bash
-# After building
-./pkgpulse cgr.dev/chainguard/wolfi-base
+# Show help
+pkgpulse --help
+
+# Show version
+pkgpulse --version
+
+# Analyze images
+pkgpulse cgr.dev/chainguard/wolfi-base
 ```
 
 ## Supported Registries
@@ -154,18 +160,18 @@ The tool uses the same authentication as Docker/Podman from your local credentia
 
 ```bash
 # Docker Hub (default registry)
-./pkgpulse nginx:alpine
-./pkgpulse docker.io/library/nginx:alpine
+pkgpulse nginx:alpine
+pkgpulse docker.io/library/nginx:alpine
 
 # Google registries
-./pkgpulse gcr.io/distroless/base
-./pkgpulse us-docker.pkg.dev/my-project/my-repo/my-image:v1.0
+pkgpulse gcr.io/distroless/base
+pkgpulse us-docker.pkg.dev/my-project/my-repo/my-image:v1.0
 
 # AWS ECR Public
-./pkgpulse public.ecr.aws/nginx/nginx:alpine
+pkgpulse public.ecr.aws/nginx/nginx:alpine
 
 # Multiple registries in one comparison
-./pkgpulse \
+pkgpulse \
   alpine:latest \
   gcr.io/distroless/static:latest \
   quay.io/prometheus/alertmanager:latest \
@@ -192,7 +198,7 @@ When comparing multiple images, you get:
 ## Example Output
 
 ```
-go run main.go cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
+pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
 Analyzing 3 images in parallel...
 
 [1/3] [cgr.dev/chainguard/wolfi-base] Fetching manifest...

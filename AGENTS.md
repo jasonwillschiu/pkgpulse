@@ -1,6 +1,6 @@
 # AGENTS.md
 
-AI agent guardrails for pkgpulse-com.
+AI agent guardrails for pkgpulse.
 
 ## Developer notes
 - After edits, run `task build` and `task lint` and fix any errors and warnings
@@ -10,7 +10,7 @@ AI agent guardrails for pkgpulse-com.
 ## Project Structure
 
 ```
-pkgpulse-com/
+pkgpulse/
 ├── main.go                  # Main CLI tool - image analysis logic
 ├── go.mod                   # Main project dependencies
 ├── Taskfile.yml             # Build automation (task runner)

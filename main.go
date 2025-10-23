@@ -17,6 +17,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
+const version = "0.5.0"
+
 /* ---- Minimal Syft JSON we need (syft-json schema) ---- */
 type syftSBOM struct {
 	Artifacts             []syftArtifact     `json:"artifacts"`
@@ -76,7 +78,20 @@ type progressMsg struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("usage: %s <image-ref> [<image-ref>...] [--csv packages.csv]\n", os.Args[0])
+		printUsage()
+		os.Exit(1)
+	}
+
+	// Handle --version and --help flags
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-v" {
+			fmt.Printf("pkgpulse version %s\n", version)
+			os.Exit(0)
+		}
+		if arg == "--help" || arg == "-h" {
+			printUsage()
+			os.Exit(0)
+		}
 	}
 
 	var images []string
@@ -425,4 +440,35 @@ func check(err error) {
 		}
 		log.Fatal(err)
 	}
+}
+
+func printUsage() {
+	fmt.Printf(`pkgpulse - Container image size analyzer
+
+Usage:
+  pkgpulse [flags] <image-ref> [<image-ref>...]
+
+Flags:
+  --help, -h        Show this help message
+  --version, -v     Show version information
+  --csv <file>      Export package data to CSV file
+
+Examples:
+  # Analyze a single image
+  pkgpulse alpine:latest
+
+  # Compare multiple images
+  pkgpulse alpine:latest ubuntu:latest debian:latest
+
+  # Export to CSV
+  pkgpulse alpine:latest --csv packages.csv
+
+Supported Registries:
+  Works with any OCI-compliant registry (Docker Hub, GCR, ECR, GHCR, etc.)
+
+Requirements:
+  - syft (SBOM generation tool)
+  - Go 1.21+ for building from source
+
+`)
 }

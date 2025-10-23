@@ -1,3 +1,10 @@
+# 0.5.0 - Add: CLI flags and project rename to pkgpulse
+- Added --version/-v and --help/-h flags
+- Renamed project from pkgpulse-com to pkgpulse
+- Updated module path to github.com/jasonwillschiu/pkgpulse
+- Comprehensive help text with usage examples
+- All documentation updated with new binary name
+
 # 0.4.0 - Add: go install support and GitHub module path
 - Updated go.mod to use GitHub module path
 - Added go install installation method (recommended)
