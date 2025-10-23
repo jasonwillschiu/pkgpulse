@@ -38,16 +38,37 @@ The following Go modules are automatically managed via `go.mod`:
 
 ## Installation
 
+### Option 1: Using go install (Recommended)
+
+Requires Go 1.21+ and syft installed:
+
+```bash
+# Install syft first
+brew install syft
+
+# Install pkgpulse
+go install github.com/jasonwillschiu/pkgpulse-com@latest
+```
+
+The binary will be installed to `~/go/bin/pkgpulse-com` (ensure `~/go/bin` is in your `$PATH`).
+
+To update to the latest version, run the same command again.
+
+### Option 2: Build from source
+
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/jasonwillschiu/pkgpulse-com
 cd pkgpulse-com
 
 # Install Go dependencies
 go mod download
 
-# Build the binary (optional)
+# Build the binary
 go build -o pkgpulse main.go
+
+# Optionally install to PATH
+sudo mv pkgpulse /usr/local/bin/
 ```
 
 ## Usage

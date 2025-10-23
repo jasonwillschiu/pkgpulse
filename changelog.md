@@ -1,3 +1,10 @@
+# 0.4.0 - Add: go install support and GitHub module path
+- Updated go.mod to use GitHub module path
+- Added go install installation method (recommended)
+- Users can now update with go install @latest
+- Updated README with two installation options
+- Added GitHub repository URL references
+
 # 0.3.0 - Add: Build automation and community files
 - Taskfile integration for build, lint, test automation
 - gopls integration for modernization checks (CutPrefix patterns)

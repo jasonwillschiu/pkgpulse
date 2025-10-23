@@ -1,4 +1,4 @@
-module pkgpulse-com
+module github.com/jasonwillschiu/pkgpulse-com
 
 go 1.25.1
 
