@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -141,8 +140,8 @@ func parseLatestChangelogEntry() (*ChangelogEntry, error) {
 		
 		if collecting {
 			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "-") {
-				bullet := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+			if after, found := strings.CutPrefix(trimmed, "-"); found {
+				bullet := strings.TrimSpace(after)
 				bulletLines = append(bulletLines, bullet)
 			}
 		}
@@ -265,22 +264,4 @@ func gitPush(tag string) error {
 	return nil
 }
 
-func findChangelogPath() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
 
-	for {
-		path := filepath.Join(cwd, changelogFile)
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
-
-		parent := filepath.Dir(cwd)
-		if parent == cwd {
-			return "", fmt.Errorf("%s not found in current directory or any parent", changelogFile)
-		}
-		cwd = parent
-	}
-}

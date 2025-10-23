@@ -19,17 +19,32 @@ import (
 
 /* ---- Minimal Syft JSON we need (syft-json schema) ---- */
 type syftSBOM struct {
-	Artifacts []syftArtifact `json:"artifacts"`
+	Artifacts             []syftArtifact     `json:"artifacts"`
+	ArtifactRelationships []syftRelationship `json:"artifactRelationships"`
+	Files                 []syftFile         `json:"files"`
 }
 type syftArtifact struct {
-	Name     string         `json:"name"`
-	Version  string         `json:"version"`
-	Type     string         `json:"type"`
-	Metadata syftMetadata   `json:"metadata"`
+	ID       string       `json:"id"`
+	Name     string       `json:"name"`
+	Version  string       `json:"version"`
+	Type     string       `json:"type"`
+	Metadata syftMetadata `json:"metadata"`
 }
 type syftMetadata struct {
 	InstalledSize int64 `json:"installedSize"` // KB for deb
 	Size          int64 `json:"size"`          // bytes for rpm and apk
+}
+type syftRelationship struct {
+	Parent string `json:"parent"`
+	Child  string `json:"child"`
+	Type   string `json:"type"`
+}
+type syftFile struct {
+	ID       string           `json:"id"`
+	Metadata syftFileMetadata `json:"metadata"`
+}
+type syftFileMetadata struct {
+	Size int64 `json:"size"`
 }
 
 /* ---- Layer info ---- */
@@ -46,12 +61,12 @@ type row struct {
 }
 
 type imageResult struct {
-	Image           string
-	CompressedMB    float64
-	InstalledMB     float64
-	PackageCount    int
-	Rows            []row
-	PackageMap      map[string]row
+	Image        string
+	CompressedMB float64
+	InstalledMB  float64
+	PackageCount int
+	Rows         []row
+	PackageMap   map[string]row
 }
 
 type progressMsg struct {
@@ -122,7 +137,7 @@ func main() {
 			results[idx] = result
 		}(i, image)
 	}
-	
+
 	wg.Wait()
 	close(progressChan)
 	<-doneChan
@@ -138,7 +153,7 @@ func main() {
 	fmt.Println(string(bytes.Repeat([]byte("="), 80)))
 	fmt.Println("RESULTS")
 	fmt.Println(string(bytes.Repeat([]byte("="), 80)) + "\n")
-	
+
 	for i, result := range results {
 		if i > 0 {
 			fmt.Println("\n" + string(bytes.Repeat([]byte("="), 80)))
@@ -183,6 +198,23 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg)
 
 	// 3) Build package list with sizes
 	logProgress(fmt.Sprintf("%s [%s] Processing %d packages...\n", prefix, image, len(sbom.Artifacts)))
+
+	// Build file lookup map for binary packages
+	fileMap := make(map[string]int64)
+	for _, f := range sbom.Files {
+		if f.Metadata.Size > 0 {
+			fileMap[f.ID] = f.Metadata.Size
+		}
+	}
+
+	// Build relationship map: artifact ID -> file ID
+	artifactToFile := make(map[string]string)
+	for _, rel := range sbom.ArtifactRelationships {
+		if rel.Type == "evident-by" {
+			artifactToFile[rel.Parent] = rel.Child
+		}
+	}
+
 	rows := make([]row, 0, len(sbom.Artifacts))
 	pkgMap := make(map[string]row)
 	var totalInstalled int64
@@ -207,8 +239,15 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg)
 			if a.Metadata.InstalledSize > 0 {
 				sizeKB = a.Metadata.InstalledSize
 			}
+		case "binary":
+			// Binary packages: look up file size via relationship
+			if fileID, ok := artifactToFile[a.ID]; ok {
+				if fileSize, ok := fileMap[fileID]; ok {
+					sizeKB = fileSize / 1024
+				}
+			}
 		default:
-			// Fallback: try both fields
+			// Fallback: try both fields (handles other package types)
 			if a.Metadata.InstalledSize > 0 {
 				sizeKB = a.Metadata.InstalledSize
 			} else if a.Metadata.Size > 0 {
@@ -231,12 +270,12 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].MB > rows[j].MB })
 
 	return imageResult{
-		Image:           image,
-		CompressedMB:    toMB(totalCompressed),
-		InstalledMB:     float64(totalInstalled) / 1024.0,
-		PackageCount:    len(rows),
-		Rows:            rows,
-		PackageMap:      pkgMap,
+		Image:        image,
+		CompressedMB: toMB(totalCompressed),
+		InstalledMB:  float64(totalInstalled) / 1024.0,
+		PackageCount: len(rows),
+		Rows:         rows,
+		PackageMap:   pkgMap,
 	}
 }
 
@@ -344,12 +383,16 @@ func runSyftAllLayersJSON(image string) syftSBOM {
 	return s
 }
 
-func writeCSV(path string, rows []row) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
+func writeCSV(path string, rows []row) (err error) {
+	f, createErr := os.Create(path)
+	if createErr != nil {
+		return createErr
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 	w := csv.NewWriter(f)
 	defer w.Flush()
 	if err := w.Write([]string{"package", "version", "installed_MB"}); err != nil {

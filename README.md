@@ -6,10 +6,11 @@ A CLI tool for analyzing and comparing container image sizes and package content
 
 - **Parallel Analysis**: Analyze multiple container images concurrently
 - **Detailed Size Metrics**: Shows both compressed (pull) size and installed (on-disk) size
-- **Package Breakdown**: Lists all packages with their individual sizes
+- **Package Breakdown**: Lists all packages with their individual sizes, including binary packages
 - **Multi-Image Comparison**: Side-by-side comparison table when analyzing multiple images
 - **CSV Export**: Export package data for further analysis
-- **Real Registry Support**: Works with any OCI-compliant registry (Docker Hub, GCR, ECR, etc.)
+- **Universal Registry Support**: Works with any OCI-compliant registry across many major cloud providers and registries
+- **Binary Package Support**: Detects and reports sizes for static binaries (Go, Rust, etc.) in addition to traditional packages (APK, RPM, DEB)
 
 ## Dependencies
 
@@ -75,6 +76,79 @@ go run main.go alpine:latest --csv packages.csv
 ```bash
 # After building
 ./pkgpulse cgr.dev/chainguard/wolfi-base
+```
+
+## Supported Registries
+
+This tool works with **any OCI-compliant container registry**. Below are examples of tested and supported registries:
+
+### Tested Registries
+
+The following registries have been verified to work:
+
+| Registry | Example Image | Notes |
+|----------|---------------|-------|
+| **Docker Hub** | `docker.io/library/alpine:latest` or `alpine:latest` | Default registry, prefix optional |
+| **Google Container Registry (GCR)** | `gcr.io/distroless/static-debian12:latest` | Google Cloud Platform |
+| **GitHub Container Registry (GHCR)** | `ghcr.io/distroless/static:latest` | GitHub Packages |
+| **Quay.io** | `quay.io/prometheus/node-exporter:latest` | Red Hat's container registry |
+| **Kubernetes Registry** | `registry.k8s.io/pause:3.9` | Official Kubernetes images |
+| **Chainguard Registry (CGR)** | `cgr.dev/chainguard/wolfi-base` | Minimal, secure images |
+
+### Additional Supported Registries
+
+These registries follow OCI standards and should work without issues:
+
+| Registry | Example Format | Provider |
+|----------|----------------|----------|
+| **Amazon ECR Public** | `public.ecr.aws/amazonlinux/amazonlinux:latest` | AWS Public Gallery |
+| **Amazon ECR Private** | `<account-id>.dkr.ecr.<region>.amazonaws.com/my-image:tag` | AWS Private Registry (requires auth) |
+| **Azure Container Registry (ACR)** | `<registry-name>.azurecr.io/my-image:tag` | Microsoft Azure (requires auth) |
+| **Google Artifact Registry** | `<region>-docker.pkg.dev/<project>/<repo>/image:tag` | Google Cloud (newer than GCR) |
+| **GitLab Container Registry** | `registry.gitlab.com/<namespace>/<project>:tag` | GitLab CI/CD |
+| **JFrog Artifactory** | `<server>.jfrog.io/<repo>/image:tag` | Enterprise artifact management |
+| **Harbor** | `<harbor-host>/library/image:tag` | Self-hosted registry |
+| **Nexus Repository** | `<nexus-host>:<port>/repository/<repo>/image:tag` | Sonatype Nexus |
+| **DigitalOcean Registry** | `registry.digitalocean.com/<namespace>/image:tag` | DigitalOcean (requires auth) |
+| **IBM Cloud Registry** | `<region>.icr.io/<namespace>/image:tag` | IBM Cloud (requires auth) |
+| **Oracle Cloud (OCIR)** | `<region>.ocir.io/<tenancy>/image:tag` | Oracle Cloud (requires auth) |
+| **Alibaba Cloud Registry** | `registry.<region>.aliyuncs.com/<namespace>/image:tag` | Alibaba Cloud (requires auth) |
+| **Tencent Cloud Registry** | `ccr.ccs.tencentyun.com/<namespace>/image:tag` | Tencent Cloud (requires auth) |
+
+### Authentication
+
+For private registries, ensure you're authenticated using Docker/Podman credentials:
+
+```bash
+# Docker Hub or other registries
+docker login <registry-url>
+
+# Or use credential helpers
+export DOCKER_CONFIG=~/.docker
+```
+
+The tool uses the same authentication as Docker/Podman from your local credential store.
+
+### Registry Format Examples
+
+```bash
+# Docker Hub (default registry)
+./pkgpulse nginx:alpine
+./pkgpulse docker.io/library/nginx:alpine
+
+# Google registries
+./pkgpulse gcr.io/distroless/base
+./pkgpulse us-docker.pkg.dev/my-project/my-repo/my-image:v1.0
+
+# AWS ECR Public
+./pkgpulse public.ecr.aws/nginx/nginx:alpine
+
+# Multiple registries in one comparison
+./pkgpulse \
+  alpine:latest \
+  gcr.io/distroless/static:latest \
+  quay.io/prometheus/alertmanager:latest \
+  ghcr.io/homeassistant/home-assistant:stable
 ```
 
 ## Output
@@ -249,16 +323,82 @@ Image 3: gcr.io/distroless/cc-debian12
 
 ## How It Works
 
-1. **Manifest Fetch**: Uses `go-containerregistry` to fetch image manifests and calculate compressed layer sizes
-2. **SBOM Generation**: Invokes `syft` with `--scope all-layers` to extract package information
-3. **Size Calculation**: Parses Syft's JSON output to extract installed sizes (handles APK, RPM, and DEB formats)
+1. **Manifest Fetch**: Uses `go-containerregistry` to fetch image manifests and calculate compressed layer sizes from any OCI-compliant registry
+2. **SBOM Generation**: Invokes `syft` with `--scope all-layers` to extract package information across all image layers
+3. **Size Calculation**: Parses Syft's JSON output to extract installed sizes from multiple sources:
+   - **Traditional packages**: APK (Alpine), RPM (Red Hat/Fedora), DEB (Debian/Ubuntu)
+   - **Binary packages**: Static binaries detected by Syft's binary classifier (Go, Rust, busybox, etc.)
+   - **File metadata**: Uses artifact relationships to correlate binaries with file sizes
 4. **Parallel Processing**: Analyzes multiple images concurrently for faster comparisons
 5. **Output Formatting**: Presents data in human-readable tables with aligned columns
 
+## Package Types Supported
+
+The tool detects and reports sizes for:
+
+- **APK packages** (Alpine Linux) - Uses `installedSize` or `size` metadata
+- **RPM packages** (Red Hat, Fedora, CentOS) - Uses `size` metadata in bytes
+- **DEB packages** (Debian, Ubuntu) - Uses `installedSize` metadata in KB
+- **Binary packages** (Go, Rust, C/C++, etc.) - Uses file size from Syft's artifact relationships
+- **Static binaries** (busybox, redis, postgresql, prometheus, etc.) - Detected via binary classifier
+
+## Development
+
+### Prerequisites
+
+- [Task](https://taskfile.dev) - Build automation tool
+  ```bash
+  # Install via Homebrew (macOS/Linux)
+  brew install go-task
+  
+  # Or via Go
+  go install github.com/go-task/task/v3/cmd/task@latest
+  ```
+
+- [gopls](https://pkg.go.dev/golang.org/x/tools/gopls) - Go language server for enhanced linting
+  ```bash
+  go install golang.org/x/tools/gopls@latest
+  ```
+
+### Available Tasks
+
+```bash
+# View all available tasks
+task --list
+
+# Format, vet, and lint code
+task lint
+
+# Run tests
+task test
+
+# Build binaries
+task build          # Main CLI tool
+task build-all      # All binaries including release-tool
+
+# Run gopls diagnostics
+task gopls-check    # Catches modernization patterns
+
+# Clean build artifacts
+task clean
+```
+
+### Code Quality
+
+The project uses multiple linting tools:
+- `go fmt` - Standard Go formatting
+- `go vet` - Go's built-in static analyzer
+- `golangci-lint` - Comprehensive linting suite
+- `gopls` - Language server diagnostics (modernization checks)
+
+Run `task lint` to execute all checks.
+
 ## License
 
-[Add your license here]
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
-[Add contribution guidelines here]
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Please also review our [Code of Conduct](CODE_OF_CONDUCT.md).

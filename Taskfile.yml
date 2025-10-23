@@ -1,0 +1,69 @@
+version: "3"
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  fmt:
+    desc: Format Go source files
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet across the module
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint and gopls diagnostics
+    deps:
+      - fmt
+      - vet
+    cmds:
+      - golangci-lint run ./...
+      - find . -name "*.go" -type f | xargs gopls check -severity=hint || true
+    ignore_error: true
+
+  gopls-check:
+    desc: Run gopls diagnostics only (includes modernize analyzer)
+    cmds:
+      - find . -name "*.go" -type f | xargs gopls check -severity=hint
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+
+  build:
+    desc: Build the pkgpulse CLI tool
+    cmds:
+      - mkdir -p bin
+      - go build -o bin/pkgpulse .
+
+  build-release-tool:
+    desc: Build the release automation tool
+    cmds:
+      - mkdir -p bin
+      - cd tools/release-tool && go build -o ../../bin/release-tool .
+
+  build-all:
+    desc: Build both pkgpulse and release-tool
+    deps:
+      - build
+      - build-release-tool
+
+  clean:
+    desc: Remove built binaries
+    cmds:
+      - rm -rf bin/
+
+  version:
+    desc: Get the latest version from changelog.md
+    cmds:
+      - ./bin/release-tool version
+
+  release:
+    desc: Create git tag and push using the latest changelog entry
+    cmds:
+      - ./bin/release-tool release

@@ -2,12 +2,18 @@
 
 AI agent guardrails for pkgpulse-com.
 
+## Developer notes
+- After edits, run `task build` and `task lint` and fix any errors and warnings
+- Use `task gopls-check` to catch modernization warnings (like CutPrefix) not in golangci-lint
+
+
 ## Project Structure
 
 ```
 pkgpulse-com/
 ├── main.go                  # Main CLI tool - image analysis logic
 ├── go.mod                   # Main project dependencies
+├── Taskfile.yml             # Build automation (task runner)
 ├── tools/
 │   └── release-tool/        # Release automation (separate Go module)
 │       ├── main.go          # version & release commands
@@ -17,26 +23,33 @@ pkgpulse-com/
 │   └── prompt-docs-writer.md
 ├── README.md                # Human-facing documentation
 ├── AGENTS.md                # This file - AI guardrails
-└── changelog.md             # SemVer changelog
+├── changelog.md             # SemVer changelog
+├── LICENSE                  # MIT License
+├── CODE_OF_CONDUCT.md       # Community code of conduct
+└── CONTRIBUTING.md          # Contribution guidelines
 ```
 
 ## Invariants
 
 - **Main tool**: Single-file Go CLI (`main.go`) - wraps Syft and go-containerregistry
-- **External dependencies**: Requires `syft` binary installed on system
+- **External dependencies**: Requires `syft` and `gopls` binaries installed on system
 - **Go version**: 1.21+ (see go.mod)
+- **Build system**: Taskfile for automation (task runner)
 - **Release tool**: Separate Go module in `tools/release-tool/` for portability
 - **Documentation**: 3 docs maintained: README.md, AGENTS.md, changelog.md
-- **No git repo yet**: Project is uninitialized; first commit pending
+- **Community files**: MIT LICENSE, CODE_OF_CONDUCT, CONTRIBUTING
 
 ## Key Patterns
 
 ### Main CLI (main.go)
-- Uses `github.com/google/go-containerregistry` for manifest fetching
+- Uses `github.com/google/go-containerregistry` for manifest fetching from any OCI registry
 - Shells out to `syft` for SBOM generation (`syft-json` format)
 - Parallel image analysis via goroutines and channels
 - Ordered progress output via buffered progress channel
-- Package size logic handles APK (bytes), RPM (bytes), DEB (KB) formats
+- Package size logic:
+  - **Traditional packages**: APK (bytes), RPM (bytes), DEB (KB)
+  - **Binary packages**: Uses artifact relationships + files array to get file sizes
+  - Handles static binaries (Go, Rust, busybox, redis, postgres, etc.)
 - Single responsibility: size comparison, not vulnerability scanning
 
 ### Release Tool (tools/release-tool/)
@@ -62,41 +75,13 @@ pkgpulse-com/
 - Update all 3 docs (README, AGENTS, changelog) when adding features
 - Use `go-containerregistry` for registry operations (never shell to docker)
 - Shell to `syft` only - parse JSON output, never scrape text
+- Parse Syft's `artifactRelationships` and `files` arrays for binary package sizes
 
 ### Never
 - Add dependencies without updating go.mod/go.sum
 - Mix release-tool and main CLI concerns
 - Commit binaries to git (bin/ is ignored)
 - Parse Syft text output - always use `-o syft-json`
-- Assume package size format - handle APK/RPM/DEB differences explicitly
+- Assume package size format - handle APK/RPM/DEB/binary differences explicitly
+- Skip binary packages - they must be detected via artifact relationships
 - Initialize git repo without user consent
-
-## Checklists
-
-### Add New Feature
-- [ ] Update main.go or tools/release-tool/ as appropriate
-- [ ] Test with real container images (wolfi-base, ubi9-micro, distroless)
-- [ ] Update README.md usage examples if CLI changes
-- [ ] Update AGENTS.md if patterns or invariants change
-- [ ] Bump changelog.md (major.minor.patch per SemVer rules)
-
-### Update Documentation (via prompt-docs-writer.md)
-- [ ] Read relevant files & check git status/diff
-- [ ] Assess: Is it major.minor.patch?
-- [ ] Update changelog.md with new version entry (prepend at top)
-- [ ] Update README.md if usage/features changed
-- [ ] Update AGENTS.md if architecture/patterns changed
-- [ ] Ensure no duplicate/conflicting info across docs
-
-### Release Workflow
-- [ ] Update changelog.md with next version
-- [ ] Run `./bin/release-tool version` to verify parsing
-- [ ] Run `./bin/release-tool release` (tags, commits, pushes)
-- [ ] Verify tag on GitHub
-
-## Ignore Patterns
-
-- `bin/` - built binaries
-- `go.sum` - lockfile (inspect but don't hand-edit)
-- `.gitignore`, `.gitattributes` - VCS config
-- `*.csv` - generated output files
