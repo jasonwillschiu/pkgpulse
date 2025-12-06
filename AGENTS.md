@@ -35,8 +35,8 @@ pkgpulse/
 
 ## Invariants
 
-- **Main tool**: Single-file Go CLI (`main.go`) - wraps Syft and go-containerregistry
-- **External dependencies**: Requires `syft` and `gopls` binaries installed on system
+- **Main tool**: Single-file Go CLI (`main.go`) - native package parsing + go-containerregistry
+- **External dependencies**: Optional `syft` (with `--use-syft` flag), `gopls` for development
 - **Go version**: 1.25+ (see go.mod)
 - **Build system**: Taskfile for automation (task runner)
 - **Release tool**: Separate Go module in `tools/release-tool/` for portability
@@ -46,19 +46,22 @@ pkgpulse/
 ## Key Patterns
 
 ### Main CLI (main.go)
-- Uses `github.com/google/go-containerregistry` for manifest fetching from any OCI registry
-- Shells out to `syft` for SBOM generation (`syft-json` format)
+- Uses `github.com/google/go-containerregistry` for image operations (daemon + registry)
+- **Default mode**: Native package database parsing (no external dependencies)
+- **Syft fallback** (`--use-syft`): Shells out to syft for SBOM generation
 - Parallel image analysis via goroutines with bounded concurrency (semaphore pattern)
-- Manifest fetch and syft scan run in parallel within each image (WaitGroup.Go)
 - Ordered progress output via buffered progress channel
-- **Default mode**: Uses `--scope squashed` + cataloger filtering for fast analysis
-- **Thorough mode** (`--thorough`/`-t`): Uses `--scope all-layers` for comprehensive analysis
-- **Local source** (`--local[=docker|podman]`): Uses local container daemon instead of registry
-- **Cataloger filtering**: Only uses `apk,deb,rpm,binary` catalogers (skips slow language scans)
+- **Auto-detection**: Checks local Docker daemon first, falls back to remote registry
+- **Force remote** (`--remote`): Skip daemon check, always use registry
+- Native parsing:
+  - **APK**: Parses `lib/apk/db/installed` text format directly
+  - **DEB**: Parses `var/lib/dpkg/status` text format directly
+  - **RPM**: Uses `github.com/knqyf263/go-rpmdb` for SQLite/BDB/NDB databases
+  - **Go binaries**: Uses `debug/buildinfo` for version/module detection
+- Reads image layers as tar archives to extract package databases
 - Package size logic:
   - **Traditional packages**: APK (bytes), RPM (bytes), DEB (KB)
-  - **Binary packages**: Uses artifact relationships + files array to get file sizes
-  - Handles static binaries (Go, Rust, busybox, redis, postgres, etc.)
+  - **Go binaries**: File size from tar headers
 - Single responsibility: size comparison, not vulnerability scanning
 
 ### Release & Distribution
@@ -87,15 +90,17 @@ pkgpulse/
 - Sort packages by size descending for display
 - Maintain separate go.mod for tools/release-tool/
 - Update all 3 docs (README, AGENTS, changelog) when adding features
-- Use `go-containerregistry` for registry operations (never shell to docker)
-- Shell to `syft` only - parse JSON output, never scrape text
-- Parse Syft's `artifactRelationships` and `files` arrays for binary package sizes
+- Use `go-containerregistry` for image operations (daemon + registry)
+- Use native parsing by default, syft only with `--use-syft` flag
+- Parse package databases directly from tar layers
+- Handle whiteout files (deletion markers) in overlay filesystems
+- Detect Go binaries using `debug/buildinfo`
 
 ### Never
 - Add dependencies without updating go.mod/go.sum
 - Mix release-tool and main CLI concerns
 - Commit binaries to git (bin/ is ignored)
-- Parse Syft text output - always use `-o syft-json`
+- Shell to docker/podman - use `go-containerregistry/pkg/v1/daemon` instead
 - Assume package size format - handle APK/RPM/DEB/binary differences explicitly
-- Skip binary packages - they must be detected via artifact relationships
+- Skip whiteout handling - files can be deleted in later layers
 - Initialize git repo without user consent

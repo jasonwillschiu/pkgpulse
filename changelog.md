@@ -1,3 +1,10 @@
+# 0.9.0 - Add: Native package parsing and daemon support
+- Native parsing of APK, DEB, and RPM databases (no syft dependency by default)
+- Auto-detection of local Docker daemon (falls back to remote registry)
+- Native Go binary detection using debug/buildinfo
+- Breaking: Replaced --thorough with --use-syft, --local with --remote flags
+- New dependencies: go-sqlite, go-rpmdb, docker SDK
+
 # 0.7.0 - Update: Performance defaults and local source support
 - Default mode is now fast (squashed scope), replaced --fast with --thorough/-t
 - Added --local flag to use docker/podman daemon (skips registry pull)

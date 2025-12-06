@@ -1,32 +1,59 @@
 package main
 
 import (
+	"archive/tar"
+	"bufio"
 	"bytes"
+	"debug/buildinfo"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
+	_ "github.com/glebarez/go-sqlite" // SQLite driver for RPM DB
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 )
 
-const version = "0.7.0"
+const version = "0.9.0"
 
 // Default concurrency limit for parallel image analysis
 const defaultConcurrency = 5
 
-// Catalogers to use for package detection (skip language-specific ones for speed)
+// Catalogers to use for syft fallback (skip language-specific ones for speed)
 const defaultCatalogers = "apk,dpkg,rpm,binary"
 
-/* ---- Minimal Syft JSON we need (syft-json schema) ---- */
+// Package database paths
+const (
+	apkDBPath       = "lib/apk/db/installed"
+	dpkgDBPath      = "var/lib/dpkg/status"
+	rpmDBPathSqlite = "var/lib/rpm/rpmdb.sqlite"
+	rpmDBPathBDB    = "var/lib/rpm/Packages"
+	rpmDBPathNDB    = "var/lib/rpm/Packages.db"
+)
+
+/* ---- Native package representation ---- */
+type pkg struct {
+	Name    string
+	Version string
+	SizeKB  int64
+	Type    string // "apk", "deb", "rpm"
+}
+
+/* ---- Minimal Syft JSON we need (syft-json schema) - for fallback ---- */
 type syftSBOM struct {
 	Artifacts             []syftArtifact     `json:"artifacts"`
 	ArtifactRelationships []syftRelationship `json:"artifactRelationships"`
@@ -56,13 +83,6 @@ type syftFileMetadata struct {
 	Size int64 `json:"size"`
 }
 
-/* ---- Layer info ---- */
-type layerRec struct {
-	Index  int
-	Digest string
-	SizeB  int64 // compressed blob size (pull size)
-}
-
 /* ---- Package row for output ---- */
 type row struct {
 	Name, Ver string
@@ -76,6 +96,7 @@ type imageResult struct {
 	PackageCount int
 	Rows         []row
 	PackageMap   map[string]row
+	Source       string // "local" or "remote"
 }
 
 type progressMsg struct {
@@ -103,27 +124,21 @@ func main() {
 
 	var images []string
 	var csvOut string
-	var thoroughMode bool
-	var localSource string // "docker" or "podman"
+	var useSyft bool
+	var forceRemote bool
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
-		switch {
-		case arg == "--csv":
+		switch arg {
+		case "--csv":
 			if i+1 < len(os.Args) {
 				csvOut = os.Args[i+1]
 				i++ // skip next arg
 			}
-		case arg == "--thorough" || arg == "-t":
-			thoroughMode = true
-		case arg == "--local":
-			localSource = "docker" // default to docker
-		case arg == "--local=docker":
-			localSource = "docker"
-		case arg == "--local=podman":
-			localSource = "podman"
-		case strings.HasPrefix(arg, "--local="):
-			localSource = strings.TrimPrefix(arg, "--local=")
-		case arg == "--version" || arg == "-v" || arg == "--help" || arg == "-h":
+		case "--use-syft":
+			useSyft = true
+		case "--remote":
+			forceRemote = true
+		case "--version", "-v", "--help", "-h":
 			// Already handled above
 		default:
 			images = append(images, arg)
@@ -168,16 +183,12 @@ func main() {
 	}()
 
 	// Build mode description for output
-	var modeStrs []string
-	if thoroughMode {
-		modeStrs = append(modeStrs, "thorough")
-	}
-	if localSource != "" {
-		modeStrs = append(modeStrs, "local:"+localSource)
-	}
 	modeStr := ""
-	if len(modeStrs) > 0 {
-		modeStr = " (" + strings.Join(modeStrs, ", ") + ")"
+	if forceRemote {
+		modeStr = " (remote only)"
+	}
+	if useSyft {
+		modeStr += " (using syft)"
 	}
 
 	if len(images) > 1 {
@@ -192,7 +203,7 @@ func main() {
 			defer wg.Done()
 			sem <- struct{}{}        // Acquire semaphore
 			defer func() { <-sem }() // Release semaphore
-			result := analyzeImage(img, idx, len(images), progressChan, thoroughMode, localSource)
+			result := analyzeImage(img, idx, len(images), progressChan, useSyft, forceRemote)
 			results[idx] = result
 		}(i, image)
 	}
@@ -237,7 +248,7 @@ func main() {
 	}
 }
 
-func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg, thoroughMode bool, localSource string) imageResult {
+func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg, useSyft bool, forceRemote bool) imageResult {
 	prefix := fmt.Sprintf("[%d/%d]", idx+1, total)
 	if total == 1 {
 		prefix = ""
@@ -247,99 +258,72 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg,
 		progressChan <- progressMsg{idx: idx, msg: msg}
 	}
 
-	// Run manifest fetch and syft scan in parallel
-	logProgress(fmt.Sprintf("%s [%s] Fetching manifest...\n", prefix, image))
+	// Parse image reference
+	ref, err := name.ParseReference(image)
+	check(err)
 
+	var img v1.Image
 	var totalCompressed int64
-	var sbom syftSBOM
-	var manifestWg sync.WaitGroup
+	source := "remote"
 
-	// 1) Fetch manifest → layers (digest + compressed size) in parallel
-	manifestWg.Go(func() {
-		_, totalCompressed = fetchLayerSizes(image)
-	})
-
-	// 2) Get packages with sizes via Syft in parallel
-	scanMode := "squashed"
-	if thoroughMode {
-		scanMode = "all-layers"
-	}
-	logProgress(fmt.Sprintf("%s [%s] Scanning packages with syft (%s)...\n", prefix, image, scanMode))
-
-	manifestWg.Go(func() {
-		sbom = runSyftJSON(image, thoroughMode, localSource)
-	})
-
-	manifestWg.Wait()
-
-	// 3) Build package list with sizes
-	logProgress(fmt.Sprintf("%s [%s] Processing %d packages...\n", prefix, image, len(sbom.Artifacts)))
-
-	// Build file lookup map for binary packages
-	fileMap := make(map[string]int64)
-	for _, f := range sbom.Files {
-		if f.Metadata.Size > 0 {
-			fileMap[f.ID] = f.Metadata.Size
+	// Try local daemon first (unless --remote flag is set)
+	if !forceRemote {
+		logProgress(fmt.Sprintf("%s [%s] Checking local daemon...\n", prefix, image))
+		localImg, localErr := daemon.Image(ref)
+		if localErr == nil {
+			img = localImg
+			source = "local"
+			logProgress(fmt.Sprintf("%s [%s] Found locally\n", prefix, image))
+			// For local images, compressed size is not meaningful (already extracted)
+			// We'll show 0 or skip it in output
 		}
 	}
 
-	// Build relationship map: artifact ID -> file ID
-	artifactToFile := make(map[string]string)
-	for _, rel := range sbom.ArtifactRelationships {
-		if rel.Type == "evident-by" {
-			artifactToFile[rel.Parent] = rel.Child
+	// Fall back to remote if not found locally or --remote flag is set
+	if img == nil {
+		logProgress(fmt.Sprintf("%s [%s] Fetching from registry...\n", prefix, image))
+		remoteImg, remoteErr := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+		check(remoteErr)
+		img = remoteImg
+		source = "remote"
+
+		// Get compressed size from manifest (only available for remote)
+		manifest, err := img.Manifest()
+		check(err)
+		for _, l := range manifest.Layers {
+			totalCompressed += l.Size
 		}
 	}
 
-	rows := make([]row, 0, len(sbom.Artifacts))
+	var packages []pkg
+
+	if useSyft {
+		// Fallback to syft
+		logProgress(fmt.Sprintf("%s [%s] Scanning with syft...\n", prefix, image))
+		packages = runSyftAndParse(image)
+	} else {
+		// Native parsing
+		logProgress(fmt.Sprintf("%s [%s] Scanning packages...\n", prefix, image))
+		packages = extractPackagesFromImage(img)
+	}
+
+	logProgress(fmt.Sprintf("%s [%s] Processing %d packages...\n", prefix, image, len(packages)))
+
+	// Build output rows
+	rows := make([]row, 0, len(packages))
 	pkgMap := make(map[string]row)
 	var totalInstalled int64
-	for _, a := range sbom.Artifacts {
-		var sizeKB int64
-		// Determine size based on package type and available metadata
-		switch a.Type {
-		case "apk":
-			// APK uses .installedSize in bytes (preferred) or .size
-			if a.Metadata.InstalledSize > 0 {
-				sizeKB = a.Metadata.InstalledSize / 1024
-			} else if a.Metadata.Size > 0 {
-				sizeKB = a.Metadata.Size / 1024
-			}
-		case "rpm":
-			// RPM uses .size in bytes
-			if a.Metadata.Size > 0 {
-				sizeKB = a.Metadata.Size / 1024
-			}
-		case "deb":
-			// DEB uses .installedSize in KB
-			if a.Metadata.InstalledSize > 0 {
-				sizeKB = a.Metadata.InstalledSize
-			}
-		case "binary":
-			// Binary packages: look up file size via relationship
-			if fileID, ok := artifactToFile[a.ID]; ok {
-				if fileSize, ok := fileMap[fileID]; ok {
-					sizeKB = fileSize / 1024
-				}
-			}
-		default:
-			// Fallback: try both fields (handles other package types)
-			if a.Metadata.InstalledSize > 0 {
-				sizeKB = a.Metadata.InstalledSize
-			} else if a.Metadata.Size > 0 {
-				sizeKB = a.Metadata.Size / 1024
-			}
-		}
 
-		if sizeKB > 0 {
-			totalInstalled += sizeKB
+	for _, p := range packages {
+		if p.SizeKB > 0 {
+			totalInstalled += p.SizeKB
 			r := row{
-				Name: a.Name,
-				Ver:  a.Version,
-				MB:   float64(sizeKB) / 1024.0,
+				Name: p.Name,
+				Ver:  p.Version,
+				MB:   float64(p.SizeKB) / 1024.0,
 			}
 			rows = append(rows, r)
-			pkgMap[a.Name] = r
+			pkgMap[p.Name] = r
 		}
 	}
 
@@ -352,12 +336,431 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg,
 		PackageCount: len(rows),
 		Rows:         rows,
 		PackageMap:   pkgMap,
+		Source:       source,
 	}
+}
+
+// extractPackagesFromImage reads package databases from image layers
+func extractPackagesFromImage(img v1.Image) []pkg {
+	layers, err := img.Layers()
+	if err != nil {
+		log.Printf("Warning: could not get layers: %v", err)
+		return nil
+	}
+
+	// We want the final state, so read layers in order
+	// and keep only the last version of each database file
+	var apkData, dpkgData []byte
+	var rpmData []byte
+	var rpmFormat string // "sqlite", "bdb", or "ndb"
+
+	// Track potential Go binaries (executable files in common locations)
+	goBinaries := make(map[string]int64) // path -> size
+
+	for _, layer := range layers {
+		rc, err := layer.Uncompressed()
+		if err != nil {
+			continue
+		}
+
+		tr := tar.NewReader(rc)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+
+			// Normalize path (remove leading /)
+			path := strings.TrimPrefix(hdr.Name, "/")
+			path = strings.TrimPrefix(path, "./")
+
+			// Check for whiteout (deletion marker)
+			if whiteoutBase, found := strings.CutPrefix(path, ".wh."); found {
+				// This is a whiteout - file was deleted
+				switch whiteoutBase {
+				case apkDBPath:
+					apkData = nil
+				case dpkgDBPath:
+					dpkgData = nil
+				case rpmDBPathSqlite:
+					rpmData = nil
+				case rpmDBPathBDB:
+					rpmData = nil
+				case rpmDBPathNDB:
+					rpmData = nil
+				}
+				// Also handle whiteout of binaries
+				delete(goBinaries, whiteoutBase)
+				continue
+			}
+
+			// Read package database files
+			switch path {
+			case apkDBPath:
+				data, _ := io.ReadAll(tr)
+				apkData = data
+			case dpkgDBPath:
+				data, _ := io.ReadAll(tr)
+				dpkgData = data
+			case rpmDBPathSqlite:
+				data, _ := io.ReadAll(tr)
+				rpmData = data
+				rpmFormat = "sqlite"
+			case rpmDBPathBDB:
+				data, _ := io.ReadAll(tr)
+				rpmData = data
+				rpmFormat = "bdb"
+			case rpmDBPathNDB:
+				data, _ := io.ReadAll(tr)
+				rpmData = data
+				rpmFormat = "ndb"
+			default:
+				// Check for potential Go binaries (executable files in bin directories)
+				if hdr.Typeflag == tar.TypeReg && hdr.Mode&0111 != 0 && hdr.Size > 0 {
+					dir := filepath.Dir(path)
+					if dir == "usr/bin" || dir == "usr/local/bin" || dir == "bin" || dir == "usr/sbin" || dir == "sbin" {
+						goBinaries[path] = hdr.Size
+					}
+				}
+			}
+		}
+		_ = rc.Close()
+	}
+
+	// Parse the databases we found
+	var packages []pkg
+
+	if len(apkData) > 0 {
+		packages = append(packages, parseAPKDB(apkData)...)
+	}
+	if len(dpkgData) > 0 {
+		packages = append(packages, parseDpkgDB(dpkgData)...)
+	}
+	if len(rpmData) > 0 {
+		packages = append(packages, parseRPMDB(rpmData, rpmFormat)...)
+	}
+
+	// If no OS packages found, try to detect Go binaries
+	if len(packages) == 0 && len(goBinaries) > 0 {
+		packages = append(packages, detectGoBinaries(img, goBinaries)...)
+	}
+
+	return packages
+}
+
+// parseRPMDB parses RPM database using go-rpmdb (supports SQLite, BerkeleyDB, NDB)
+func parseRPMDB(data []byte, format string) []pkg {
+	// Write data to temp file (go-rpmdb needs file path)
+	tmpFile, err := os.CreateTemp("", "rpmdb-*")
+	if err != nil {
+		log.Printf("Warning: could not create temp file for RPM DB: %v", err)
+		return nil
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		log.Printf("Warning: could not write RPM DB to temp file: %v", err)
+		return nil
+	}
+	_ = tmpFile.Close()
+
+	// Open RPM database
+	db, err := rpmdb.Open(tmpFile.Name())
+	if err != nil {
+		log.Printf("Warning: could not open RPM DB (%s): %v", format, err)
+		return nil
+	}
+	defer func() { _ = db.Close() }()
+
+	// List packages
+	pkgList, err := db.ListPackages()
+	if err != nil {
+		log.Printf("Warning: could not list RPM packages: %v", err)
+		return nil
+	}
+
+	var packages []pkg
+	for _, p := range pkgList {
+		if p.Name != "" {
+			packages = append(packages, pkg{
+				Name:    p.Name,
+				Version: fmt.Sprintf("%s-%s", p.Version, p.Release),
+				SizeKB:  int64(p.Size) / 1024,
+				Type:    "rpm",
+			})
+		}
+	}
+
+	return packages
+}
+
+// detectGoBinaries checks executable files for Go build info
+func detectGoBinaries(img v1.Image, candidates map[string]int64) []pkg {
+	var packages []pkg
+
+	layers, err := img.Layers()
+	if err != nil {
+		return nil
+	}
+
+	// Read each candidate binary and check if it's a Go binary
+	for _, layer := range layers {
+		rc, err := layer.Uncompressed()
+		if err != nil {
+			continue
+		}
+
+		tr := tar.NewReader(rc)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+
+			path := strings.TrimPrefix(hdr.Name, "/")
+			path = strings.TrimPrefix(path, "./")
+
+			size, isCandidate := candidates[path]
+			if !isCandidate {
+				continue
+			}
+
+			// Read binary data
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				continue
+			}
+
+			// Try to read Go build info
+			info, err := buildinfo.Read(bytes.NewReader(data))
+			if err != nil {
+				continue // Not a Go binary
+			}
+
+			// Extract binary name and version
+			name := filepath.Base(path)
+			version := info.GoVersion
+			if info.Main.Version != "" && info.Main.Version != "(devel)" {
+				version = info.Main.Version
+			}
+
+			packages = append(packages, pkg{
+				Name:    name,
+				Version: version,
+				SizeKB:  size / 1024,
+				Type:    "binary",
+			})
+
+			// Remove from candidates so we don't process again
+			delete(candidates, path)
+		}
+		_ = rc.Close()
+	}
+
+	return packages
+}
+
+// parseAPKDB parses Alpine's /lib/apk/db/installed format
+func parseAPKDB(data []byte) []pkg {
+	var packages []pkg
+	var current pkg
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if line == "" {
+			// End of package entry
+			if current.Name != "" {
+				packages = append(packages, current)
+			}
+			current = pkg{Type: "apk"}
+			continue
+		}
+
+		if len(line) < 2 || line[1] != ':' {
+			continue
+		}
+
+		key := line[0]
+		value := line[2:]
+
+		switch key {
+		case 'P': // Package name
+			current.Name = value
+		case 'V': // Version
+			current.Version = value
+		case 'I': // Installed size (bytes)
+			if size, err := strconv.ParseInt(value, 10, 64); err == nil {
+				current.SizeKB = size / 1024
+			}
+		case 'S': // Package size (fallback if I not present)
+			if current.SizeKB == 0 {
+				if size, err := strconv.ParseInt(value, 10, 64); err == nil {
+					current.SizeKB = size / 1024
+				}
+			}
+		}
+	}
+
+	// Don't forget last package
+	if current.Name != "" {
+		packages = append(packages, current)
+	}
+
+	return packages
+}
+
+// parseDpkgDB parses Debian's /var/lib/dpkg/status format
+func parseDpkgDB(data []byte) []pkg {
+	var packages []pkg
+	var current pkg
+	var isInstalled bool
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if line == "" {
+			// End of package entry
+			if current.Name != "" && isInstalled {
+				packages = append(packages, current)
+			}
+			current = pkg{Type: "deb"}
+			isInstalled = false
+			continue
+		}
+
+		// Handle continuation lines (start with space)
+		if strings.HasPrefix(line, " ") {
+			continue
+		}
+
+		idx := strings.Index(line, ": ")
+		if idx == -1 {
+			continue
+		}
+
+		key := line[:idx]
+		value := line[idx+2:]
+
+		switch key {
+		case "Package":
+			current.Name = value
+		case "Version":
+			current.Version = value
+		case "Installed-Size":
+			// dpkg stores size in KB
+			if size, err := strconv.ParseInt(value, 10, 64); err == nil {
+				current.SizeKB = size
+			}
+		case "Status":
+			// Only count installed packages
+			isInstalled = strings.Contains(value, "installed")
+		}
+	}
+
+	// Don't forget last package
+	if current.Name != "" && isInstalled {
+		packages = append(packages, current)
+	}
+
+	return packages
+}
+
+// runSyftAndParse runs syft and parses output (fallback mode)
+func runSyftAndParse(image string) []pkg {
+	cmd := exec.Command("syft", image,
+		"--scope", "squashed",
+		"--select-catalogers", defaultCatalogers,
+		"-o", "syft-json")
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("syft failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	var sbom syftSBOM
+	if err := json.Unmarshal(out.Bytes(), &sbom); err != nil {
+		log.Fatalf("parse syft-json: %v", err)
+	}
+
+	// Build file lookup map for binary packages
+	fileMap := make(map[string]int64)
+	for _, f := range sbom.Files {
+		if f.Metadata.Size > 0 {
+			fileMap[f.ID] = f.Metadata.Size
+		}
+	}
+
+	artifactToFile := make(map[string]string)
+	for _, rel := range sbom.ArtifactRelationships {
+		if rel.Type == "evident-by" {
+			artifactToFile[rel.Parent] = rel.Child
+		}
+	}
+
+	var packages []pkg
+	for _, a := range sbom.Artifacts {
+		var sizeKB int64
+		switch a.Type {
+		case "apk":
+			if a.Metadata.InstalledSize > 0 {
+				sizeKB = a.Metadata.InstalledSize / 1024
+			} else if a.Metadata.Size > 0 {
+				sizeKB = a.Metadata.Size / 1024
+			}
+		case "rpm":
+			if a.Metadata.Size > 0 {
+				sizeKB = a.Metadata.Size / 1024
+			}
+		case "deb":
+			if a.Metadata.InstalledSize > 0 {
+				sizeKB = a.Metadata.InstalledSize
+			}
+		case "binary":
+			if fileID, ok := artifactToFile[a.ID]; ok {
+				if fileSize, ok := fileMap[fileID]; ok {
+					sizeKB = fileSize / 1024
+				}
+			}
+		default:
+			if a.Metadata.InstalledSize > 0 {
+				sizeKB = a.Metadata.InstalledSize
+			} else if a.Metadata.Size > 0 {
+				sizeKB = a.Metadata.Size / 1024
+			}
+		}
+
+		if sizeKB > 0 {
+			packages = append(packages, pkg{
+				Name:    a.Name,
+				Version: a.Version,
+				SizeKB:  sizeKB,
+				Type:    a.Type,
+			})
+		}
+	}
+
+	return packages
 }
 
 func displayImageBreakdown(result imageResult) {
 	fmt.Printf("Image: %s\n", result.Image)
-	fmt.Printf("Compressed size (pull): %.2f MB\n", result.CompressedMB)
+	fmt.Printf("Source: %s\n", result.Source)
+	if result.CompressedMB > 0 {
+		fmt.Printf("Compressed size (pull): %.2f MB\n", result.CompressedMB)
+	} else {
+		fmt.Printf("Compressed size (pull): N/A (local image)\n")
+	}
 	fmt.Printf("Installed size (on disk): %.2f MB\n", result.InstalledMB)
 	fmt.Printf("Packages: %d\n\n", result.PackageCount)
 
@@ -371,11 +774,15 @@ func displayImageBreakdown(result imageResult) {
 func displayComparisonTable(results []imageResult) {
 	// Summary comparison
 	fmt.Println("Summary Comparison:")
-	fmt.Printf("%-55s %15s %15s %10s\n", "Image", "Compressed", "Installed", "Packages")
-	fmt.Println(string(bytes.Repeat([]byte("-"), 97)))
+	fmt.Printf("%-50s %8s %15s %15s %10s\n", "Image", "Source", "Compressed", "Installed", "Packages")
+	fmt.Println(string(bytes.Repeat([]byte("-"), 102)))
 	for _, r := range results {
-		fmt.Printf("%-55s %15s %15s %10d\n",
-			trunc(r.Image, 55), fmt.Sprintf("%.2f MB", r.CompressedMB),
+		compressedStr := fmt.Sprintf("%.2f MB", r.CompressedMB)
+		if r.CompressedMB == 0 {
+			compressedStr = "N/A"
+		}
+		fmt.Printf("%-50s %8s %15s %15s %10d\n",
+			trunc(r.Image, 50), r.Source, compressedStr,
 			fmt.Sprintf("%.2f MB", r.InstalledMB), r.PackageCount)
 	}
 	fmt.Println()
@@ -422,55 +829,6 @@ func displayComparisonTable(results []imageResult) {
 	for i, r := range results {
 		fmt.Printf("Image %d: %s\n", i+1, r.Image)
 	}
-}
-
-func fetchLayerSizes(image string) ([]layerRec, int64) {
-	ref, err := name.ParseReference(image)
-	check(err)
-	img, err := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
-	check(err)
-	m, err := img.Manifest()
-	check(err)
-	layers := make([]layerRec, 0, len(m.Layers))
-	var total int64
-	for i, l := range m.Layers {
-		layers = append(layers, layerRec{
-			Index:  i,
-			Digest: l.Digest.String(),
-			SizeB:  l.Size,
-		})
-		total += l.Size
-	}
-	return layers, total
-}
-
-func runSyftJSON(image string, thoroughMode bool, localSource string) syftSBOM {
-	scope := "squashed" // Default: faster, analyzes only final filesystem state
-	if thoroughMode {
-		scope = "all-layers" // Thorough: analyzes all layers, catches removed packages
-	}
-
-	// Build image source - use local daemon if specified
-	imageSource := image
-	if localSource != "" {
-		imageSource = localSource + ":" + image
-	}
-
-	cmd := exec.Command("syft", imageSource,
-		"--scope", scope,
-		"--select-catalogers", defaultCatalogers,
-		"-o", "syft-json")
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("syft failed: %v\nstderr:\n%s", err, stderr.String())
-	}
-	var s syftSBOM
-	if err := json.Unmarshal(out.Bytes(), &s); err != nil {
-		log.Fatalf("parse syft-json: %v", err)
-	}
-	return s
 }
 
 func writeCSV(path string, rows []row) (err error) {
@@ -526,34 +884,49 @@ Usage:
 Flags:
   --help, -h        Show this help message
   --version, -v     Show version information
-  --thorough, -t    Thorough mode: scan all layers (slower, catches removed packages)
-  --local[=SOURCE]  Use local container daemon instead of registry pull
-                    SOURCE can be: docker (default), podman
+  --remote          Skip local daemon check, always fetch from registry
+  --use-syft        Use syft instead of native parsing (optional fallback)
   --csv <file>      Export package data to CSV file
 
+Image Resolution:
+  By default, pkgpulse checks your local Docker/Podman daemon first.
+  If the image exists locally, it uses that (faster, no network).
+  If not found locally, it fetches from the remote registry.
+  Use --remote to skip the local check and always pull from registry.
+
 Examples:
-  # Analyze a single image (fast by default)
+  # Analyze any image (checks local first, then remote)
   pkgpulse alpine:latest
+  pkgpulse postgres:latest
+  pkgpulse mysql:latest
+  pkgpulse redhat/ubi9-micro
 
-  # Thorough analysis (scans all layers)
-  pkgpulse --thorough alpine:latest
-
-  # Use locally pulled image (faster for repeated analysis)
-  pkgpulse --local postgres:latest
-  pkgpulse --local=podman postgres:latest
+  # Force fetching from remote registry
+  pkgpulse --remote alpine:latest
 
   # Compare multiple images
-  pkgpulse alpine:latest ubuntu:latest debian:latest
+  pkgpulse alpine:latest postgres:latest mysql:latest
 
   # Export to CSV
   pkgpulse alpine:latest --csv packages.csv
 
+  # Use syft for edge cases (Rust binaries, unusual formats)
+  pkgpulse --use-syft some-image:latest
+
 Supported Registries:
   Works with any OCI-compliant registry (Docker Hub, GCR, ECR, GHCR, etc.)
 
+Package Detection (all native, no external tools required):
+  - APK (Alpine Linux)
+  - DEB (Debian, Ubuntu)
+  - RPM (RHEL, Fedora, CentOS, Oracle Linux)
+  - Go binaries (detected via build info)
+
 Requirements:
-  - syft (SBOM generation tool)
-  - Go 1.21+ for building from source
+  - No external tools required for native mode
+  - Docker or Podman daemon (optional, for local image check)
+  - syft (only if using --use-syft flag)
+  - Go 1.25+ for building from source
 
 `)
 }

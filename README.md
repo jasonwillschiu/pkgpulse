@@ -18,7 +18,23 @@ A CLI tool for analyzing and comparing container image sizes and package content
 
 ### Required
 
-- **[Syft](https://github.com/anchore/syft)** - SBOM generation tool
+- **Go 1.25+** - For building the application
+  ```bash
+  # Check your version
+  go version
+  ```
+
+- **Docker or Podman** (optional) - For local image analysis
+  ```bash
+  # Check if available
+  docker --version
+  # or
+  podman --version
+  ```
+
+### Optional
+
+- **[Syft](https://github.com/anchore/syft)** - SBOM fallback (only needed with `--use-syft` flag)
   ```bash
   # Install via Homebrew (macOS/Linux)
   brew install syft
@@ -27,16 +43,12 @@ A CLI tool for analyzing and comparing container image sizes and package content
   curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
   ```
 
-- **Go 1.25+** - For building the application
-  ```bash
-  # Check your version
-  go version
-  ```
-
 ### Go Dependencies
 
 The following Go modules are automatically managed via `go.mod`:
-- `github.com/google/go-containerregistry` - Container registry client
+- `github.com/google/go-containerregistry` - Container registry and daemon client
+- `github.com/glebarez/go-sqlite` - SQLite driver for RPM databases
+- `github.com/knqyf263/go-rpmdb` - Native RPM database parser
 
 ## Installation
 
@@ -45,9 +57,6 @@ The following Go modules are automatically managed via `go.mod`:
 ```bash
 # Install pkgpulse
 curl -sSL https://raw.githubusercontent.com/jasonwillschiu/pkgpulse/main/scripts/install.sh | sh
-
-# Install syft dependency
-brew install syft
 ```
 
 ### Option 2: Homebrew (macOS/Linux)
@@ -58,17 +67,11 @@ brew tap jasonwillschiu/tap
 brew install pkgpulse
 ```
 
-This automatically installs syft as a dependency.
-
 ### Option 3: Using go install
 
-Requires Go 1.21+ and syft installed:
+Requires Go 1.25+:
 
 ```bash
-# Install syft first
-brew install syft
-
-# Install pkgpulse
 go install github.com/jasonwillschiu/pkgpulse@latest
 ```
 
@@ -105,31 +108,25 @@ Compare multiple images:
 pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
 ```
 
-### Thorough Mode
+### Local vs Remote
 
-By default, pkgpulse uses fast analysis (squashed scope + filtered catalogers). For comprehensive layer-by-layer analysis, use `--thorough`:
+By default, pkgpulse auto-detects local Docker daemon images (fast, no registry pull). To force remote registry fetch:
 ```bash
-# Thorough analysis (scans all image layers)
-pkgpulse --thorough python:3.12
-
-# Compare with thorough scanning
-pkgpulse -t node:20 node:22 python:3.12
+# Force remote registry fetch
+pkgpulse --remote postgres:latest
 ```
 
-Thorough mode uses Syft's `all-layers` scope which scans every image layer. This catches packages that were installed then removed in later layers, but is slower.
+Local daemon detection is automatic and significantly faster for images you've already pulled.
 
-### Local Source
+### Syft Fallback
 
-Skip registry pulls by using locally cached images:
+By default, pkgpulse uses native package database parsing. To use syft instead (requires syft installed):
 ```bash
-# Use image from local Docker daemon
-pkgpulse --local postgres:latest
-
-# Use image from Podman
-pkgpulse --local=podman postgres:latest
+# Use syft for SBOM generation
+pkgpulse --use-syft python:3.12
 ```
 
-This is significantly faster for repeated analysis of the same image.
+Native parsing is faster and has no external dependencies, but syft fallback is available for compatibility.
 
 ### CSV Export
 
@@ -396,24 +393,27 @@ Image 3: gcr.io/distroless/cc-debian12
 
 ## How It Works
 
-1. **Manifest Fetch**: Uses `go-containerregistry` to fetch image manifests and calculate compressed layer sizes from any OCI-compliant registry (runs in parallel with SBOM generation)
-2. **SBOM Generation**: Invokes `syft` with `--scope squashed` (default) or `--scope all-layers` (thorough mode), using filtered catalogers (apk, deb, rpm, binary) for speed
-3. **Size Calculation**: Parses Syft's JSON output to extract installed sizes from multiple sources:
-   - **Traditional packages**: APK (Alpine), RPM (Red Hat/Fedora), DEB (Debian/Ubuntu)
-   - **Binary packages**: Static binaries detected by Syft's binary classifier (Go, Rust, busybox, etc.)
-   - **File metadata**: Uses artifact relationships to correlate binaries with file sizes
-4. **Parallel Processing**: Analyzes multiple images concurrently for faster comparisons
-5. **Output Formatting**: Presents data in human-readable tables with aligned columns
+1. **Image Source**: Auto-detects local Docker daemon, falls back to remote registry via `go-containerregistry`
+2. **Layer Extraction**: Reads image layers as tar archives to extract package databases and binaries
+3. **Native Parsing**: Directly parses package database files:
+   - **APK**: Parses `lib/apk/db/installed` text format
+   - **DEB**: Parses `var/lib/dpkg/status` text format
+   - **RPM**: Parses SQLite/BDB/NDB databases using native Go libraries
+   - **Go binaries**: Uses `debug/buildinfo` to detect and extract metadata
+4. **Size Calculation**: Extracts installed sizes directly from package databases
+5. **Syft Fallback**: Optionally invokes `syft` with `--use-syft` flag for compatibility
+6. **Parallel Processing**: Analyzes multiple images concurrently for faster comparisons
+7. **Output Formatting**: Presents data in human-readable tables with aligned columns
 
 ## Package Types Supported
 
 The tool detects and reports sizes for:
 
-- **APK packages** (Alpine Linux) - Uses `installedSize` or `size` metadata
-- **RPM packages** (Red Hat, Fedora, CentOS) - Uses `size` metadata in bytes
-- **DEB packages** (Debian, Ubuntu) - Uses `installedSize` metadata in KB
-- **Binary packages** (Go, Rust, C/C++, etc.) - Uses file size from Syft's artifact relationships
-- **Static binaries** (busybox, redis, postgresql, prometheus, etc.) - Detected via binary classifier
+- **APK packages** (Alpine Linux) - Native parsing of installed database
+- **RPM packages** (Red Hat, Fedora, CentOS) - Native parsing of SQLite/BDB/NDB databases
+- **DEB packages** (Debian, Ubuntu) - Native parsing of dpkg status file
+- **Go binaries** - Native detection using `debug/buildinfo`
+- **Syft fallback** - All Syft-supported types when using `--use-syft` flag
 
 ## Development
 
