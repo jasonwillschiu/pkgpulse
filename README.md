@@ -4,13 +4,15 @@ A CLI tool for analyzing and comparing container image sizes and package content
 
 ## Features
 
-- **Parallel Analysis**: Analyze multiple container images concurrently
+- **Parallel Analysis**: Analyze multiple container images concurrently (bounded concurrency for stability)
+- **Fast Mode**: Optional `--fast` flag for 2-3x faster analysis of large images
 - **Detailed Size Metrics**: Shows both compressed (pull) size and installed (on-disk) size
 - **Package Breakdown**: Lists all packages with their individual sizes, including binary packages
 - **Multi-Image Comparison**: Side-by-side comparison table when analyzing multiple images
 - **CSV Export**: Export package data for further analysis
 - **Universal Registry Support**: Works with any OCI-compliant registry across many major cloud providers and registries
 - **Binary Package Support**: Detects and reports sizes for static binaries (Go, Rust, etc.) in addition to traditional packages (APK, RPM, DEB)
+- **Easy Installation**: Install via curl script, Homebrew, or go install
 
 ## Dependencies
 
@@ -38,7 +40,27 @@ The following Go modules are automatically managed via `go.mod`:
 
 ## Installation
 
-### Option 1: Using go install (Recommended)
+### Option 1: Curl install (Quick start)
+
+```bash
+# Install pkgpulse
+curl -sSL https://raw.githubusercontent.com/jasonwillschiu/pkgpulse/main/scripts/install.sh | sh
+
+# Install syft dependency
+brew install syft
+```
+
+### Option 2: Homebrew (macOS/Linux)
+
+```bash
+# Add the tap and install
+brew tap jasonwillschiu/tap
+brew install pkgpulse
+```
+
+This automatically installs syft as a dependency.
+
+### Option 3: Using go install
 
 Requires Go 1.21+ and syft installed:
 
@@ -52,9 +74,7 @@ go install github.com/jasonwillschiu/pkgpulse@latest
 
 The binary will be installed to `~/go/bin/pkgpulse` (ensure `~/go/bin` is in your `$PATH`).
 
-To update to the latest version, run the same command again.
-
-### Option 2: Build from source
+### Option 4: Build from source
 
 ```bash
 # Clone the repository
@@ -84,6 +104,19 @@ Compare multiple images:
 ```bash
 pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
 ```
+
+### Fast Mode
+
+For large images, use `--fast` mode for 2-3x faster analysis:
+```bash
+# Fast analysis (analyzes only final filesystem)
+pkgpulse --fast python:3.12
+
+# Compare multiple large images quickly
+pkgpulse -f node:20 node:22 python:3.12
+```
+
+Fast mode uses Syft's `squashed` scope instead of `all-layers`, which only analyzes the final filesystem state. This may miss some packages that exist only in intermediate layers, but is much faster for typical use cases.
 
 ### CSV Export
 

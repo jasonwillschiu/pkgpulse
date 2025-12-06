@@ -1,3 +1,11 @@
+# 0.6.0 - Add: Performance optimizations and installation improvements
+- Added --fast/-f flag for faster analysis (uses squashed scope, 2-3x faster)
+- Added worker pool with concurrency limit (max 5 parallel analyses)
+- Added GoReleaser configuration for automated cross-platform releases
+- Added curl install script for one-liner installation
+- Added Homebrew formula template for brew tap support
+- Improved progress output to show scan mode (all-layers vs squashed)
+
 # 0.5.0 - Add: CLI flags and project rename to pkgpulse
 - Added --version/-v and --help/-h flags
 - Renamed project from pkgpulse-com to pkgpulse

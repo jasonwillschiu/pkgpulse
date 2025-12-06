@@ -1,0 +1,86 @@
+# GoReleaser configuration for pkgpulse
+# Documentation: https://goreleaser.com
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pkgpulse
+    main: .
+    binary: pkgpulse
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+    # Ignore windows/arm64 as it's uncommon
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    # Use zip for windows
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: jasonwillschiu
+    name: pkgpulse
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+
+# Homebrew tap configuration
+brews:
+  - name: pkgpulse
+    repository:
+      owner: jasonwillschiu
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/jasonwillschiu/pkgpulse"
+    description: "CLI tool for analyzing and comparing container image sizes"
+    license: "MIT"
+    dependencies:
+      - name: syft
+        type: required
+    test: |
+      system "#{bin}/pkgpulse", "--version"
+    install: |
+      bin.install "pkgpulse"
