@@ -1,3 +1,10 @@
+# 0.7.0 - Update: Performance defaults and local source support
+- Default mode is now fast (squashed scope), replaced --fast with --thorough/-t
+- Added --local flag to use docker/podman daemon (skips registry pull)
+- Added cataloger filtering (apk,deb,rpm,binary) to skip slow language scans
+- Parallelized manifest fetch and syft scan within each image
+- Uses WaitGroup.Go for modern goroutine patterns (Go 1.25+)
+
 # 0.6.0 - Add: Performance optimizations and installation improvements
 - Added --fast/-f flag for faster analysis (uses squashed scope, 2-3x faster)
 - Added worker pool with concurrency limit (max 5 parallel analyses)

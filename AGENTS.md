@@ -37,7 +37,7 @@ pkgpulse/
 
 - **Main tool**: Single-file Go CLI (`main.go`) - wraps Syft and go-containerregistry
 - **External dependencies**: Requires `syft` and `gopls` binaries installed on system
-- **Go version**: 1.21+ (see go.mod)
+- **Go version**: 1.25+ (see go.mod)
 - **Build system**: Taskfile for automation (task runner)
 - **Release tool**: Separate Go module in `tools/release-tool/` for portability
 - **Documentation**: 3 docs maintained: README.md, AGENTS.md, changelog.md
@@ -49,9 +49,12 @@ pkgpulse/
 - Uses `github.com/google/go-containerregistry` for manifest fetching from any OCI registry
 - Shells out to `syft` for SBOM generation (`syft-json` format)
 - Parallel image analysis via goroutines with bounded concurrency (semaphore pattern)
+- Manifest fetch and syft scan run in parallel within each image (WaitGroup.Go)
 - Ordered progress output via buffered progress channel
-- **Fast mode** (`--fast`/`-f`): Uses `--scope squashed` for 2-3x faster analysis
-- **Default mode**: Uses `--scope all-layers` for comprehensive analysis
+- **Default mode**: Uses `--scope squashed` + cataloger filtering for fast analysis
+- **Thorough mode** (`--thorough`/`-t`): Uses `--scope all-layers` for comprehensive analysis
+- **Local source** (`--local[=docker|podman]`): Uses local container daemon instead of registry
+- **Cataloger filtering**: Only uses `apk,deb,rpm,binary` catalogers (skips slow language scans)
 - Package size logic:
   - **Traditional packages**: APK (bytes), RPM (bytes), DEB (KB)
   - **Binary packages**: Uses artifact relationships + files array to get file sizes

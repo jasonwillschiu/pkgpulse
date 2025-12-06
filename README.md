@@ -5,7 +5,7 @@ A CLI tool for analyzing and comparing container image sizes and package content
 ## Features
 
 - **Parallel Analysis**: Analyze multiple container images concurrently (bounded concurrency for stability)
-- **Fast Mode**: Optional `--fast` flag for 2-3x faster analysis of large images
+- **Fast by Default**: Uses squashed scope and filtered catalogers for optimal speed
 - **Detailed Size Metrics**: Shows both compressed (pull) size and installed (on-disk) size
 - **Package Breakdown**: Lists all packages with their individual sizes, including binary packages
 - **Multi-Image Comparison**: Side-by-side comparison table when analyzing multiple images
@@ -27,7 +27,7 @@ A CLI tool for analyzing and comparing container image sizes and package content
   curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
   ```
 
-- **Go 1.25.1+** - For building the application
+- **Go 1.25+** - For building the application
   ```bash
   # Check your version
   go version
@@ -105,18 +105,31 @@ Compare multiple images:
 pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
 ```
 
-### Fast Mode
+### Thorough Mode
 
-For large images, use `--fast` mode for 2-3x faster analysis:
+By default, pkgpulse uses fast analysis (squashed scope + filtered catalogers). For comprehensive layer-by-layer analysis, use `--thorough`:
 ```bash
-# Fast analysis (analyzes only final filesystem)
-pkgpulse --fast python:3.12
+# Thorough analysis (scans all image layers)
+pkgpulse --thorough python:3.12
 
-# Compare multiple large images quickly
-pkgpulse -f node:20 node:22 python:3.12
+# Compare with thorough scanning
+pkgpulse -t node:20 node:22 python:3.12
 ```
 
-Fast mode uses Syft's `squashed` scope instead of `all-layers`, which only analyzes the final filesystem state. This may miss some packages that exist only in intermediate layers, but is much faster for typical use cases.
+Thorough mode uses Syft's `all-layers` scope which scans every image layer. This catches packages that were installed then removed in later layers, but is slower.
+
+### Local Source
+
+Skip registry pulls by using locally cached images:
+```bash
+# Use image from local Docker daemon
+pkgpulse --local postgres:latest
+
+# Use image from Podman
+pkgpulse --local=podman postgres:latest
+```
+
+This is significantly faster for repeated analysis of the same image.
 
 ### CSV Export
 
@@ -383,8 +396,8 @@ Image 3: gcr.io/distroless/cc-debian12
 
 ## How It Works
 
-1. **Manifest Fetch**: Uses `go-containerregistry` to fetch image manifests and calculate compressed layer sizes from any OCI-compliant registry
-2. **SBOM Generation**: Invokes `syft` with `--scope all-layers` to extract package information across all image layers
+1. **Manifest Fetch**: Uses `go-containerregistry` to fetch image manifests and calculate compressed layer sizes from any OCI-compliant registry (runs in parallel with SBOM generation)
+2. **SBOM Generation**: Invokes `syft` with `--scope squashed` (default) or `--scope all-layers` (thorough mode), using filtered catalogers (apk, deb, rpm, binary) for speed
 3. **Size Calculation**: Parses Syft's JSON output to extract installed sizes from multiple sources:
    - **Traditional packages**: APK (Alpine), RPM (Red Hat/Fedora), DEB (Debian/Ubuntu)
    - **Binary packages**: Static binaries detected by Syft's binary classifier (Go, Rust, busybox, etc.)

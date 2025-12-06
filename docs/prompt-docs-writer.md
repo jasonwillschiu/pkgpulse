@@ -1,13 +1,12 @@
 # Documentation Scope
 
 - You're a documentation specialist, your job is to upsert documentation so it's clear and concise
-- Use a variety of `git` and other commands to check for the most relevant changes
+- Use a variety of`git` and other commands to check for the most relevant changes
 - The more lines of code were edited, the more you should read those files directly to see what changed
 - When I reference this doc, you should use the relevant git commands, read the relevant files and bump the version up
 - Use your best judgement if it's major.minor.patch and follow the rules below
 - A final side effect is that you ensure that the documentation in README.md and AGENTS.md doesn't have duplicate, conflicting or outdated information
 - Be thorough and refactor the docs as refactors in code occur
-- When you read the 3 docs, any number of the docs may or may not have been updated, use your best judgement from reading files and assess which need updating and which are already up to date.
 - You maintain 3 key docs in this repo:
 
 ---
@@ -40,7 +39,6 @@
   - Ignore list (generated files, lockfiles)
 - NEVER verbose; act as a system prompt.
 - Update when new conventions or patterns are introduced.
-- If it doesn't exist, create a symlink to AGENTS.md for a CLAUDE.md
 
 ---
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -17,10 +18,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
 
 // Default concurrency limit for parallel image analysis
 const defaultConcurrency = 5
+
+// Catalogers to use for package detection (skip language-specific ones for speed)
+const defaultCatalogers = "apk,dpkg,rpm,binary"
 
 /* ---- Minimal Syft JSON we need (syft-json schema) ---- */
 type syftSBOM struct {
@@ -99,7 +103,8 @@ func main() {
 
 	var images []string
 	var csvOut string
-	var fastMode bool
+	var thoroughMode bool
+	var localSource string // "docker" or "podman"
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		switch {
@@ -108,8 +113,16 @@ func main() {
 				csvOut = os.Args[i+1]
 				i++ // skip next arg
 			}
-		case arg == "--fast" || arg == "-f":
-			fastMode = true
+		case arg == "--thorough" || arg == "-t":
+			thoroughMode = true
+		case arg == "--local":
+			localSource = "docker" // default to docker
+		case arg == "--local=docker":
+			localSource = "docker"
+		case arg == "--local=podman":
+			localSource = "podman"
+		case strings.HasPrefix(arg, "--local="):
+			localSource = strings.TrimPrefix(arg, "--local=")
 		case arg == "--version" || arg == "-v" || arg == "--help" || arg == "-h":
 			// Already handled above
 		default:
@@ -154,14 +167,23 @@ func main() {
 		doneChan <- true
 	}()
 
+	// Build mode description for output
+	var modeStrs []string
+	if thoroughMode {
+		modeStrs = append(modeStrs, "thorough")
+	}
+	if localSource != "" {
+		modeStrs = append(modeStrs, "local:"+localSource)
+	}
+	modeStr := ""
+	if len(modeStrs) > 0 {
+		modeStr = " (" + strings.Join(modeStrs, ", ") + ")"
+	}
+
 	if len(images) > 1 {
-		modeStr := ""
-		if fastMode {
-			modeStr = " (fast mode)"
-		}
 		fmt.Fprintf(os.Stderr, "Analyzing %d images in parallel%s...\n\n", len(images), modeStr)
-	} else if fastMode {
-		fmt.Fprintf(os.Stderr, "Analyzing in fast mode...\n\n")
+	} else if modeStr != "" {
+		fmt.Fprintf(os.Stderr, "Analyzing%s...\n\n", modeStr)
 	}
 
 	for i, image := range images {
@@ -170,7 +192,7 @@ func main() {
 			defer wg.Done()
 			sem <- struct{}{}        // Acquire semaphore
 			defer func() { <-sem }() // Release semaphore
-			result := analyzeImage(img, idx, len(images), progressChan, fastMode)
+			result := analyzeImage(img, idx, len(images), progressChan, thoroughMode, localSource)
 			results[idx] = result
 		}(i, image)
 	}
@@ -215,7 +237,7 @@ func main() {
 	}
 }
 
-func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg, fastMode bool) imageResult {
+func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg, thoroughMode bool, localSource string) imageResult {
 	prefix := fmt.Sprintf("[%d/%d]", idx+1, total)
 	if total == 1 {
 		prefix = ""
@@ -225,17 +247,30 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg,
 		progressChan <- progressMsg{idx: idx, msg: msg}
 	}
 
-	// 1) Fetch manifest → layers (digest + compressed size)
+	// Run manifest fetch and syft scan in parallel
 	logProgress(fmt.Sprintf("%s [%s] Fetching manifest...\n", prefix, image))
-	_, totalCompressed := fetchLayerSizes(image)
 
-	// 2) Get packages with sizes via Syft
-	scanMode := "all-layers"
-	if fastMode {
-		scanMode = "squashed"
+	var totalCompressed int64
+	var sbom syftSBOM
+	var manifestWg sync.WaitGroup
+
+	// 1) Fetch manifest → layers (digest + compressed size) in parallel
+	manifestWg.Go(func() {
+		_, totalCompressed = fetchLayerSizes(image)
+	})
+
+	// 2) Get packages with sizes via Syft in parallel
+	scanMode := "squashed"
+	if thoroughMode {
+		scanMode = "all-layers"
 	}
 	logProgress(fmt.Sprintf("%s [%s] Scanning packages with syft (%s)...\n", prefix, image, scanMode))
-	sbom := runSyftJSON(image, fastMode)
+
+	manifestWg.Go(func() {
+		sbom = runSyftJSON(image, thoroughMode, localSource)
+	})
+
+	manifestWg.Wait()
 
 	// 3) Build package list with sizes
 	logProgress(fmt.Sprintf("%s [%s] Processing %d packages...\n", prefix, image, len(sbom.Artifacts)))
@@ -409,12 +444,22 @@ func fetchLayerSizes(image string) ([]layerRec, int64) {
 	return layers, total
 }
 
-func runSyftJSON(image string, fastMode bool) syftSBOM {
-	scope := "all-layers"
-	if fastMode {
-		scope = "squashed" // Much faster: only analyzes final filesystem state
+func runSyftJSON(image string, thoroughMode bool, localSource string) syftSBOM {
+	scope := "squashed" // Default: faster, analyzes only final filesystem state
+	if thoroughMode {
+		scope = "all-layers" // Thorough: analyzes all layers, catches removed packages
 	}
-	cmd := exec.Command("syft", image, "--scope", scope, "-o", "syft-json")
+
+	// Build image source - use local daemon if specified
+	imageSource := image
+	if localSource != "" {
+		imageSource = localSource + ":" + image
+	}
+
+	cmd := exec.Command("syft", imageSource,
+		"--scope", scope,
+		"--select-catalogers", defaultCatalogers,
+		"-o", "syft-json")
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -481,15 +526,21 @@ Usage:
 Flags:
   --help, -h        Show this help message
   --version, -v     Show version information
-  --fast, -f        Fast mode: analyze only final filesystem (faster but may miss some packages)
+  --thorough, -t    Thorough mode: scan all layers (slower, catches removed packages)
+  --local[=SOURCE]  Use local container daemon instead of registry pull
+                    SOURCE can be: docker (default), podman
   --csv <file>      Export package data to CSV file
 
 Examples:
-  # Analyze a single image
+  # Analyze a single image (fast by default)
   pkgpulse alpine:latest
 
-  # Fast analysis (2-3x faster for large images)
-  pkgpulse --fast alpine:latest
+  # Thorough analysis (scans all layers)
+  pkgpulse --thorough alpine:latest
+
+  # Use locally pulled image (faster for repeated analysis)
+  pkgpulse --local postgres:latest
+  pkgpulse --local=podman postgres:latest
 
   # Compare multiple images
   pkgpulse alpine:latest ubuntu:latest debian:latest
