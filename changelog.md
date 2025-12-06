@@ -1,3 +1,6 @@
+# 0.10.1 - Fix: Version constant mismatch
+- Fixed version constant to match git tag (was showing 0.9.0)
+
 # 0.10.0 - Add: Local image cache and dependency cleanup
 - Local tarball-based image cache for faster repeated analysis
 - New cache subcommand: list, clear, rm, path operations

@@ -25,13 +25,13 @@ import (
 	_ "github.com/glebarez/go-sqlite" // SQLite driver for RPM DB
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 )
 
-const version = "0.9.0"
+const version = "0.10.1"
 
 // Default concurrency limit for parallel image analysis
 const defaultConcurrency = 5
@@ -1155,7 +1155,7 @@ Cache Commands:
 Image Resolution:
   1. Check local cache (tarballs stored in ~/.cache/pkgpulse/)
   2. Fetch from remote registry, save to cache
-  
+
   Cached images enable fast parallel analysis.
   Use --no-cache to skip cache and fetch fresh.
 
