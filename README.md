@@ -5,7 +5,7 @@ A CLI tool for analyzing and comparing container image sizes and package content
 ## Features
 
 - **Parallel Analysis**: Analyze multiple container images concurrently (bounded concurrency for stability)
-- **Fast by Default**: Uses squashed scope and filtered catalogers for optimal speed
+- **Local Image Cache**: Automatic tarball-based caching for instant repeated analysis
 - **Detailed Size Metrics**: Shows both compressed (pull) size and installed (on-disk) size
 - **Package Breakdown**: Lists all packages with their individual sizes, including binary packages
 - **Multi-Image Comparison**: Side-by-side comparison table when analyzing multiple images
@@ -24,13 +24,6 @@ A CLI tool for analyzing and comparing container image sizes and package content
   go version
   ```
 
-- **Docker or Podman** (optional) - For local image analysis
-  ```bash
-  # Check if available
-  docker --version
-  # or
-  podman --version
-  ```
 
 ### Optional
 
@@ -46,7 +39,7 @@ A CLI tool for analyzing and comparing container image sizes and package content
 ### Go Dependencies
 
 The following Go modules are automatically managed via `go.mod`:
-- `github.com/google/go-containerregistry` - Container registry and daemon client
+- `github.com/google/go-containerregistry` - Container registry client and tarball operations
 - `github.com/glebarez/go-sqlite` - SQLite driver for RPM databases
 - `github.com/knqyf263/go-rpmdb` - Native RPM database parser
 
@@ -108,15 +101,19 @@ Compare multiple images:
 pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
 ```
 
-### Local vs Remote
+### Image Cache
 
-By default, pkgpulse auto-detects local Docker daemon images (fast, no registry pull). To force remote registry fetch:
+By default, pkgpulse caches images locally as tarballs for instant repeated analysis:
 ```bash
-# Force remote registry fetch
-pkgpulse --remote postgres:latest
-```
+# First run: fetches from registry and caches
+pkgpulse alpine:latest
 
-Local daemon detection is automatic and significantly faster for images you've already pulled.
+# Second run: loads from cache (instant)
+pkgpulse alpine:latest
+
+# Disable cache for fresh pull
+pkgpulse --no-cache alpine:latest
+```
 
 ### Syft Fallback
 
@@ -127,6 +124,25 @@ pkgpulse --use-syft python:3.12
 ```
 
 Native parsing is faster and has no external dependencies, but syft fallback is available for compatibility.
+
+### Cache Management
+
+Manage the local image cache:
+```bash
+# List cached images
+pkgpulse cache list
+
+# Show cache directory path
+pkgpulse cache path
+
+# Remove specific image from cache
+pkgpulse cache rm alpine:latest
+
+# Clear entire cache
+pkgpulse cache clear
+```
+
+Cache location follows XDG Base Directory specification (`$XDG_CACHE_HOME/pkgpulse` or `~/.cache/pkgpulse`).
 
 ### CSV Export
 
@@ -393,17 +409,19 @@ Image 3: gcr.io/distroless/cc-debian12
 
 ## How It Works
 
-1. **Image Source**: Auto-detects local Docker daemon, falls back to remote registry via `go-containerregistry`
-2. **Layer Extraction**: Reads image layers as tar archives to extract package databases and binaries
-3. **Native Parsing**: Directly parses package database files:
+1. **Cache Check**: Checks local tarball cache for previously fetched images
+2. **Image Fetch**: If not cached, fetches from OCI registry via `go-containerregistry`
+3. **Cache Storage**: Saves image as tarball with metadata (digest, timestamp, size)
+4. **Layer Extraction**: Reads image layers as tar archives to extract package databases and binaries
+5. **Native Parsing**: Directly parses package database files:
    - **APK**: Parses `lib/apk/db/installed` text format
    - **DEB**: Parses `var/lib/dpkg/status` text format
    - **RPM**: Parses SQLite/BDB/NDB databases using native Go libraries
    - **Go binaries**: Uses `debug/buildinfo` to detect and extract metadata
-4. **Size Calculation**: Extracts installed sizes directly from package databases
-5. **Syft Fallback**: Optionally invokes `syft` with `--use-syft` flag for compatibility
-6. **Parallel Processing**: Analyzes multiple images concurrently for faster comparisons
-7. **Output Formatting**: Presents data in human-readable tables with aligned columns
+6. **Size Calculation**: Extracts installed sizes directly from package databases
+7. **Syft Fallback**: Optionally invokes `syft` with `--use-syft` flag for compatibility
+8. **Parallel Processing**: Analyzes multiple images concurrently for faster comparisons
+9. **Output Formatting**: Presents data in human-readable tables with aligned columns
 
 ## Package Types Supported
 

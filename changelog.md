@@ -1,3 +1,10 @@
+# 0.10.0 - Add: Local image cache and dependency cleanup
+- Local tarball-based image cache for faster repeated analysis
+- New cache subcommand: list, clear, rm, path operations
+- Breaking: Replaced --remote flag with --no-cache (inverted logic)
+- Removed Docker daemon dependency (replaced with tarball cache)
+- Dependency cleanup: removed unused OpenTelemetry, Docker SDK packages
+
 # 0.9.0 - Add: Native package parsing and daemon support
 - Native parsing of APK, DEB, and RPM databases (no syft dependency by default)
 - Auto-detection of local Docker daemon (falls back to remote registry)

@@ -40,19 +40,20 @@ pkgpulse/
 - **Go version**: 1.25+ (see go.mod)
 - **Build system**: Taskfile for automation (task runner)
 - **Release tool**: Separate Go module in `tools/release-tool/` for portability
+- **Cache system**: Local tarball cache in `$XDG_CACHE_HOME/pkgpulse` or `~/.cache/pkgpulse`
 - **Documentation**: 3 docs maintained: README.md, AGENTS.md, changelog.md
 - **Community files**: MIT LICENSE, CODE_OF_CONDUCT, CONTRIBUTING
 
 ## Key Patterns
 
 ### Main CLI (main.go)
-- Uses `github.com/google/go-containerregistry` for image operations (daemon + registry)
+- Uses `github.com/google/go-containerregistry` for registry + tarball operations
 - **Default mode**: Native package database parsing (no external dependencies)
 - **Syft fallback** (`--use-syft`): Shells out to syft for SBOM generation
 - Parallel image analysis via goroutines with bounded concurrency (semaphore pattern)
-- Ordered progress output via buffered progress channel
-- **Auto-detection**: Checks local Docker daemon first, falls back to remote registry
-- **Force remote** (`--remote`): Skip daemon check, always use registry
+- Immediate progress output (not buffered/ordered)
+- **Cache-first architecture**: Checks local tarball cache before fetching
+- **Cache bypass** (`--no-cache`): Skip cache, always fetch from registry
 - Native parsing:
   - **APK**: Parses `lib/apk/db/installed` text format directly
   - **DEB**: Parses `var/lib/dpkg/status` text format directly
@@ -63,6 +64,14 @@ pkgpulse/
   - **Traditional packages**: APK (bytes), RPM (bytes), DEB (KB)
   - **Go binaries**: File size from tar headers
 - Single responsibility: size comparison, not vulnerability scanning
+
+### Cache System
+- **Storage**: Tarballs + JSON metadata in XDG cache directory
+- **Cache key**: SHA256 hash (first 8 bytes) + sanitized image ref
+- **Metadata**: Image ref, digest, cached timestamp, tarball size
+- **Operations**: list, clear, rm, path subcommands
+- **Workflow**: fetch → save tarball → reload from cache for fast analysis
+- **Invalidation**: Manual only (no automatic digest checking yet)
 
 ### Release & Distribution
 - **GoReleaser**: Cross-platform builds (linux/darwin, amd64/arm64)
@@ -90,17 +99,20 @@ pkgpulse/
 - Sort packages by size descending for display
 - Maintain separate go.mod for tools/release-tool/
 - Update all 3 docs (README, AGENTS, changelog) when adding features
-- Use `go-containerregistry` for image operations (daemon + registry)
+- Use `go-containerregistry` for image operations (registry + tarball)
 - Use native parsing by default, syft only with `--use-syft` flag
 - Parse package databases directly from tar layers
 - Handle whiteout files (deletion markers) in overlay filesystems
 - Detect Go binaries using `debug/buildinfo`
+- Cache images by default (unless `--no-cache` or `--use-syft`)
+- Follow XDG Base Directory spec for cache location
 
 ### Never
 - Add dependencies without updating go.mod/go.sum
 - Mix release-tool and main CLI concerns
 - Commit binaries to git (bin/ is ignored)
-- Shell to docker/podman - use `go-containerregistry/pkg/v1/daemon` instead
+- Shell to docker/podman - use `go-containerregistry` for all image ops
 - Assume package size format - handle APK/RPM/DEB/binary differences explicitly
 - Skip whiteout handling - files can be deleted in later layers
 - Initialize git repo without user consent
+- Hardcode cache paths - always use XDG spec via `getCacheDir()`

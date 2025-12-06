@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"debug/buildinfo"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,13 +20,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/glebarez/go-sqlite" // SQLite driver for RPM DB
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 )
 
@@ -44,6 +47,14 @@ const (
 	rpmDBPathBDB    = "var/lib/rpm/Packages"
 	rpmDBPathNDB    = "var/lib/rpm/Packages.db"
 )
+
+// Cache metadata stored alongside tarball
+type cacheEntry struct {
+	ImageRef  string    `json:"image_ref"`
+	Digest    string    `json:"digest"`
+	CachedAt  time.Time `json:"cached_at"`
+	SizeBytes int64     `json:"size_bytes"`
+}
 
 /* ---- Native package representation ---- */
 type pkg struct {
@@ -104,6 +115,230 @@ type progressMsg struct {
 	msg string
 }
 
+/* ---- Cache functions ---- */
+
+func getCacheDir() string {
+	cacheDir := os.Getenv("XDG_CACHE_HOME")
+	if cacheDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		cacheDir = filepath.Join(home, ".cache")
+	}
+	return filepath.Join(cacheDir, "pkgpulse")
+}
+
+func hashImageRef(ref string) string {
+	h := sha256.Sum256([]byte(ref))
+	return hex.EncodeToString(h[:8]) // First 8 bytes = 16 hex chars
+}
+
+func getCachePaths(imageRef string) (tarPath, metaPath string) {
+	cacheDir := getCacheDir()
+	if cacheDir == "" {
+		return "", ""
+	}
+	hash := hashImageRef(imageRef)
+	safeName := strings.ReplaceAll(imageRef, "/", "_")
+	safeName = strings.ReplaceAll(safeName, ":", "_")
+	baseName := fmt.Sprintf("%s_%s", safeName, hash)
+	return filepath.Join(cacheDir, baseName+".tar"), filepath.Join(cacheDir, baseName+".json")
+}
+
+func loadFromCache(imageRef string, logProgress func(string)) (v1.Image, *cacheEntry, bool) {
+	tarPath, metaPath := getCachePaths(imageRef)
+	if tarPath == "" {
+		return nil, nil, false
+	}
+
+	// Check if cache files exist
+	if _, err := os.Stat(tarPath); os.IsNotExist(err) {
+		return nil, nil, false
+	}
+	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
+		return nil, nil, false
+	}
+
+	// Load metadata
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		return nil, nil, false
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal(metaData, &entry); err != nil {
+		return nil, nil, false
+	}
+
+	// Load image from tarball
+	logProgress("Loading from cache...")
+	img, err := tarball.ImageFromPath(tarPath, nil)
+	if err != nil {
+		logProgress(fmt.Sprintf("Cache read failed: %v", err))
+		return nil, nil, false
+	}
+
+	return img, &entry, true
+}
+
+func saveToCache(imageRef string, img v1.Image, logProgress func(string)) error {
+	tarPath, metaPath := getCachePaths(imageRef)
+	if tarPath == "" {
+		return fmt.Errorf("could not determine cache directory")
+	}
+
+	// Ensure cache directory exists
+	cacheDir := getCacheDir()
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+
+	logProgress("Saving to cache...")
+
+	// Get image digest
+	digest, err := img.Digest()
+	if err != nil {
+		return fmt.Errorf("get digest: %w", err)
+	}
+
+	// Write tarball
+	ref, err := name.ParseReference(imageRef)
+	if err != nil {
+		return fmt.Errorf("parse ref: %w", err)
+	}
+	if err := tarball.WriteToFile(tarPath, ref, img); err != nil {
+		return fmt.Errorf("write tarball: %w", err)
+	}
+
+	// Get file size
+	info, err := os.Stat(tarPath)
+	if err != nil {
+		return fmt.Errorf("stat tarball: %w", err)
+	}
+
+	// Write metadata
+	entry := cacheEntry{
+		ImageRef:  imageRef,
+		Digest:    digest.String(),
+		CachedAt:  time.Now(),
+		SizeBytes: info.Size(),
+	}
+	metaData, err := json.MarshalIndent(entry, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+	if err := os.WriteFile(metaPath, metaData, 0644); err != nil {
+		return fmt.Errorf("write metadata: %w", err)
+	}
+
+	return nil
+}
+
+func listCache() ([]cacheEntry, error) {
+	cacheDir := getCacheDir()
+	if cacheDir == "" {
+		return nil, fmt.Errorf("could not determine cache directory")
+	}
+
+	entries, err := os.ReadDir(cacheDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var cached []cacheEntry
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cacheDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var entry cacheEntry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			continue
+		}
+		cached = append(cached, entry)
+	}
+	return cached, nil
+}
+
+func clearCache() error {
+	cacheDir := getCacheDir()
+	if cacheDir == "" {
+		return fmt.Errorf("could not determine cache directory")
+	}
+	return os.RemoveAll(cacheDir)
+}
+
+func removeCacheEntry(imageRef string) error {
+	tarPath, metaPath := getCachePaths(imageRef)
+	if tarPath == "" {
+		return fmt.Errorf("could not determine cache path")
+	}
+	_ = os.Remove(tarPath)
+	_ = os.Remove(metaPath)
+	return nil
+}
+
+func handleCacheCommand(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: pkgpulse cache <command>")
+		fmt.Println("\nCommands:")
+		fmt.Println("  list    List cached images")
+		fmt.Println("  clear   Remove all cached images")
+		fmt.Println("  rm      Remove specific cached image")
+		fmt.Println("  path    Show cache directory path")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "list":
+		entries, err := listCache()
+		if err != nil {
+			log.Fatalf("list cache: %v", err)
+		}
+		if len(entries) == 0 {
+			fmt.Println("Cache is empty")
+			return
+		}
+		fmt.Printf("%-50s %10s %s\n", "IMAGE", "SIZE", "CACHED AT")
+		fmt.Println(strings.Repeat("-", 80))
+		var totalSize int64
+		for _, e := range entries {
+			sizeMB := float64(e.SizeBytes) / (1024 * 1024)
+			fmt.Printf("%-50s %8.1f MB %s\n", trunc(e.ImageRef, 50), sizeMB, e.CachedAt.Format("2006-01-02 15:04"))
+			totalSize += e.SizeBytes
+		}
+		fmt.Println(strings.Repeat("-", 80))
+		fmt.Printf("Total: %d images, %.1f MB\n", len(entries), float64(totalSize)/(1024*1024))
+
+	case "clear":
+		if err := clearCache(); err != nil {
+			log.Fatalf("clear cache: %v", err)
+		}
+		fmt.Println("Cache cleared")
+
+	case "rm":
+		if len(args) < 2 {
+			log.Fatalf("usage: pkgpulse cache rm <image>")
+		}
+		if err := removeCacheEntry(args[1]); err != nil {
+			log.Fatalf("remove cache entry: %v", err)
+		}
+		fmt.Printf("Removed %s from cache\n", args[1])
+
+	case "path":
+		fmt.Println(getCacheDir())
+
+	default:
+		log.Fatalf("unknown cache command: %s", args[0])
+	}
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -122,10 +357,16 @@ func main() {
 		}
 	}
 
+	// Handle cache subcommands
+	if os.Args[1] == "cache" {
+		handleCacheCommand(os.Args[2:])
+		return
+	}
+
 	var images []string
 	var csvOut string
 	var useSyft bool
-	var forceRemote bool
+	var noCache bool
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		switch arg {
@@ -136,8 +377,8 @@ func main() {
 			}
 		case "--use-syft":
 			useSyft = true
-		case "--remote":
-			forceRemote = true
+		case "--no-cache":
+			noCache = true
 		case "--version", "-v", "--help", "-h":
 			// Already handled above
 		default:
@@ -160,32 +401,18 @@ func main() {
 	progressChan := make(chan progressMsg, 100)
 	doneChan := make(chan bool)
 
-	// Progress printer goroutine - prints messages in order
+	// Progress printer goroutine - prints messages immediately
 	go func() {
-		nextIdx := 0
-		buffer := make(map[int][]string)
 		for msg := range progressChan {
-			buffer[msg.idx] = append(buffer[msg.idx], msg.msg)
-			// Print all buffered messages that are ready
-			for {
-				if msgs, ok := buffer[nextIdx]; ok {
-					for _, m := range msgs {
-						fmt.Fprint(os.Stderr, m)
-					}
-					delete(buffer, nextIdx)
-					nextIdx++
-				} else {
-					break
-				}
-			}
+			fmt.Fprint(os.Stderr, msg.msg)
 		}
 		doneChan <- true
 	}()
 
 	// Build mode description for output
 	modeStr := ""
-	if forceRemote {
-		modeStr = " (remote only)"
+	if noCache {
+		modeStr = " (no cache)"
 	}
 	if useSyft {
 		modeStr += " (using syft)"
@@ -203,7 +430,10 @@ func main() {
 			defer wg.Done()
 			sem <- struct{}{}        // Acquire semaphore
 			defer func() { <-sem }() // Release semaphore
-			result := analyzeImage(img, idx, len(images), progressChan, useSyft, forceRemote)
+			logFunc := func(msg progressMsg) {
+				progressChan <- msg
+			}
+			result := analyzeImage(img, idx, len(images), logFunc, useSyft, noCache)
 			results[idx] = result
 		}(i, image)
 	}
@@ -218,26 +448,20 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[%d/%d] ✓ %s\n", i+1, len(images), img)
 	}
 
-	// Display individual breakdowns
+	// Display results
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Println(string(bytes.Repeat([]byte("="), 80)))
-	fmt.Println("RESULTS")
-	fmt.Println(string(bytes.Repeat([]byte("="), 80)) + "\n")
 
-	for i, result := range results {
-		if i > 0 {
-			fmt.Println("\n" + string(bytes.Repeat([]byte("="), 80)))
-			fmt.Println()
-		}
-		displayImageBreakdown(result)
-	}
-
-	// Display comparison table if multiple images
 	if len(results) > 1 {
-		fmt.Println("\n" + string(bytes.Repeat([]byte("="), 80)))
-		fmt.Println("COMPARISON TABLE")
+		// Multiple images: only show comparison table (skip individual breakdowns)
+		fmt.Println("COMPARISON")
 		fmt.Println(string(bytes.Repeat([]byte("="), 80)) + "\n")
 		displayComparisonTable(results)
+	} else {
+		// Single image: show detailed breakdown
+		fmt.Println("RESULTS")
+		fmt.Println(string(bytes.Repeat([]byte("="), 80)) + "\n")
+		displayImageBreakdown(results[0])
 	}
 
 	if csvOut != "" {
@@ -248,14 +472,14 @@ func main() {
 	}
 }
 
-func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg, useSyft bool, forceRemote bool) imageResult {
+func analyzeImage(image string, idx, total int, sendProgress func(progressMsg), useSyft bool, noCache bool) imageResult {
 	prefix := fmt.Sprintf("[%d/%d]", idx+1, total)
 	if total == 1 {
 		prefix = ""
 	}
 
 	logProgress := func(msg string) {
-		progressChan <- progressMsg{idx: idx, msg: msg}
+		sendProgress(progressMsg{idx: idx, msg: msg})
 	}
 
 	// Parse image reference
@@ -264,34 +488,51 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg,
 
 	var img v1.Image
 	var totalCompressed int64
-	source := "remote"
+	source := "cache"
 
-	// Try local daemon first (unless --remote flag is set)
-	if !forceRemote {
-		logProgress(fmt.Sprintf("%s [%s] Checking local daemon...\n", prefix, image))
-		localImg, localErr := daemon.Image(ref)
-		if localErr == nil {
-			img = localImg
-			source = "local"
-			logProgress(fmt.Sprintf("%s [%s] Found locally\n", prefix, image))
-			// For local images, compressed size is not meaningful (already extracted)
-			// We'll show 0 or skip it in output
+	// Try cache first (unless --no-cache or --use-syft)
+	if !noCache && !useSyft {
+		if cachedImg, _, ok := loadFromCache(image, func(msg string) {
+			logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+		}); ok {
+			img = cachedImg
 		}
 	}
 
-	// Fall back to remote if not found locally or --remote flag is set
+	// Fetch from registry if not in cache
 	if img == nil {
 		logProgress(fmt.Sprintf("%s [%s] Fetching from registry...\n", prefix, image))
 		remoteImg, remoteErr := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
 		check(remoteErr)
-		img = remoteImg
 		source = "remote"
 
-		// Get compressed size from manifest (only available for remote)
-		manifest, err := img.Manifest()
+		// Get compressed size from manifest
+		manifest, err := remoteImg.Manifest()
 		check(err)
 		for _, l := range manifest.Layers {
 			totalCompressed += l.Size
+		}
+
+		// Save to cache and reload for consistent fast analysis
+		if !noCache && !useSyft {
+			if err := saveToCache(image, remoteImg, func(msg string) {
+				logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+			}); err != nil {
+				logProgress(fmt.Sprintf("%s [%s] Cache save failed: %v\n", prefix, image, err))
+				img = remoteImg // Fall back to remote image if cache fails
+			} else {
+				// Reload from cache for fast parallel analysis
+				if cachedImg, _, ok := loadFromCache(image, func(msg string) {
+					logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+				}); ok {
+					img = cachedImg
+					source = "cached"
+				} else {
+					img = remoteImg
+				}
+			}
+		} else {
+			img = remoteImg
 		}
 	}
 
@@ -303,8 +544,9 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg,
 		packages = runSyftAndParse(image)
 	} else {
 		// Native parsing
-		logProgress(fmt.Sprintf("%s [%s] Scanning packages...\n", prefix, image))
-		packages = extractPackagesFromImage(img)
+		packages = extractPackagesFromImage(img, func(msg string) {
+			logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+		})
 	}
 
 	logProgress(fmt.Sprintf("%s [%s] Processing %d packages...\n", prefix, image, len(packages)))
@@ -341,12 +583,15 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg,
 }
 
 // extractPackagesFromImage reads package databases from image layers
-func extractPackagesFromImage(img v1.Image) []pkg {
+func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 	layers, err := img.Layers()
 	if err != nil {
 		log.Printf("Warning: could not get layers: %v", err)
 		return nil
 	}
+
+	totalLayers := len(layers)
+	logProgress(fmt.Sprintf("Scanning %d layers...", totalLayers))
 
 	// We want the final state, so read layers in order
 	// and keep only the last version of each database file
@@ -357,7 +602,9 @@ func extractPackagesFromImage(img v1.Image) []pkg {
 	// Track potential Go binaries (executable files in common locations)
 	goBinaries := make(map[string]int64) // path -> size
 
-	for _, layer := range layers {
+	for i, layer := range layers {
+		logProgress(fmt.Sprintf("Layer %d/%d...", i+1, totalLayers))
+
 		rc, err := layer.Uncompressed()
 		if err != nil {
 			continue
@@ -434,17 +681,27 @@ func extractPackagesFromImage(img v1.Image) []pkg {
 	var packages []pkg
 
 	if len(apkData) > 0 {
-		packages = append(packages, parseAPKDB(apkData)...)
+		logProgress("Found APK database, parsing...")
+		pkgs := parseAPKDB(apkData)
+		packages = append(packages, pkgs...)
+		logProgress(fmt.Sprintf("Found %d APK packages", len(pkgs)))
 	}
 	if len(dpkgData) > 0 {
-		packages = append(packages, parseDpkgDB(dpkgData)...)
+		logProgress("Found dpkg database, parsing...")
+		pkgs := parseDpkgDB(dpkgData)
+		packages = append(packages, pkgs...)
+		logProgress(fmt.Sprintf("Found %d deb packages", len(pkgs)))
 	}
 	if len(rpmData) > 0 {
-		packages = append(packages, parseRPMDB(rpmData, rpmFormat)...)
+		logProgress(fmt.Sprintf("Found RPM database (%s), parsing...", rpmFormat))
+		pkgs := parseRPMDB(rpmData, rpmFormat)
+		packages = append(packages, pkgs...)
+		logProgress(fmt.Sprintf("Found %d RPM packages", len(pkgs)))
 	}
 
 	// If no OS packages found, try to detect Go binaries
 	if len(packages) == 0 && len(goBinaries) > 0 {
+		logProgress(fmt.Sprintf("No OS packages, checking %d binaries for Go...", len(goBinaries)))
 		packages = append(packages, detectGoBinaries(img, goBinaries)...)
 	}
 
@@ -880,32 +1137,39 @@ func printUsage() {
 
 Usage:
   pkgpulse [flags] <image-ref> [<image-ref>...]
+  pkgpulse cache <command>
 
 Flags:
   --help, -h        Show this help message
   --version, -v     Show version information
-  --remote          Skip local daemon check, always fetch from registry
+  --no-cache        Bypass cache, always fetch fresh from registry
   --use-syft        Use syft instead of native parsing (optional fallback)
   --csv <file>      Export package data to CSV file
 
+Cache Commands:
+  pkgpulse cache list     List cached images with sizes
+  pkgpulse cache clear    Remove all cached images
+  pkgpulse cache rm IMG   Remove specific image from cache
+  pkgpulse cache path     Show cache directory location
+
 Image Resolution:
-  By default, pkgpulse checks your local Docker/Podman daemon first.
-  If the image exists locally, it uses that (faster, no network).
-  If not found locally, it fetches from the remote registry.
-  Use --remote to skip the local check and always pull from registry.
+  1. Check local cache (tarballs stored in ~/.cache/pkgpulse/)
+  2. Fetch from remote registry, save to cache
+  
+  Cached images enable fast parallel analysis.
+  Use --no-cache to skip cache and fetch fresh.
 
 Examples:
-  # Analyze any image (checks local first, then remote)
+  # Analyze any image (uses cache if available)
   pkgpulse alpine:latest
-  pkgpulse postgres:latest
-  pkgpulse mysql:latest
-  pkgpulse redhat/ubi9-micro
+  pkgpulse postgres:latest mysql:latest
 
-  # Force fetching from remote registry
-  pkgpulse --remote alpine:latest
+  # Force fresh fetch (bypass cache)
+  pkgpulse --no-cache alpine:latest
 
-  # Compare multiple images
-  pkgpulse alpine:latest postgres:latest mysql:latest
+  # Manage cache
+  pkgpulse cache list
+  pkgpulse cache clear
 
   # Export to CSV
   pkgpulse alpine:latest --csv packages.csv
@@ -924,7 +1188,7 @@ Package Detection (all native, no external tools required):
 
 Requirements:
   - No external tools required for native mode
-  - Docker or Podman daemon (optional, for local image check)
+  - Network access to container registry
   - syft (only if using --use-syft flag)
   - Go 1.25+ for building from source
 
