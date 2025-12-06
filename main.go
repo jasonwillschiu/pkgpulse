@@ -17,7 +17,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
+
+// Default concurrency limit for parallel image analysis
+const defaultConcurrency = 5
 
 /* ---- Minimal Syft JSON we need (syft-json schema) ---- */
 type syftSBOM struct {
@@ -96,23 +99,34 @@ func main() {
 
 	var images []string
 	var csvOut string
+	var fastMode bool
 	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "--csv" {
+		arg := os.Args[i]
+		switch {
+		case arg == "--csv":
 			if i+1 < len(os.Args) {
 				csvOut = os.Args[i+1]
+				i++ // skip next arg
 			}
-			break
+		case arg == "--fast" || arg == "-f":
+			fastMode = true
+		case arg == "--version" || arg == "-v" || arg == "--help" || arg == "-h":
+			// Already handled above
+		default:
+			images = append(images, arg)
 		}
-		images = append(images, os.Args[i])
 	}
 
 	if len(images) == 0 {
 		log.Fatalf("no images specified")
 	}
 
-	// Analyze images in parallel
+	// Analyze images in parallel with bounded concurrency
 	results := make([]imageResult, len(images))
 	var wg sync.WaitGroup
+
+	// Semaphore to limit concurrent goroutines
+	sem := make(chan struct{}, defaultConcurrency)
 
 	// Channel for ordered progress output
 	progressChan := make(chan progressMsg, 100)
@@ -141,14 +155,22 @@ func main() {
 	}()
 
 	if len(images) > 1 {
-		fmt.Fprintf(os.Stderr, "Analyzing %d images in parallel...\n\n", len(images))
+		modeStr := ""
+		if fastMode {
+			modeStr = " (fast mode)"
+		}
+		fmt.Fprintf(os.Stderr, "Analyzing %d images in parallel%s...\n\n", len(images), modeStr)
+	} else if fastMode {
+		fmt.Fprintf(os.Stderr, "Analyzing in fast mode...\n\n")
 	}
 
 	for i, image := range images {
 		wg.Add(1)
 		go func(idx int, img string) {
 			defer wg.Done()
-			result := analyzeImage(img, idx, len(images), progressChan)
+			sem <- struct{}{}        // Acquire semaphore
+			defer func() { <-sem }() // Release semaphore
+			result := analyzeImage(img, idx, len(images), progressChan, fastMode)
 			results[idx] = result
 		}(i, image)
 	}
@@ -193,7 +215,7 @@ func main() {
 	}
 }
 
-func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg) imageResult {
+func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg, fastMode bool) imageResult {
 	prefix := fmt.Sprintf("[%d/%d]", idx+1, total)
 	if total == 1 {
 		prefix = ""
@@ -208,8 +230,12 @@ func analyzeImage(image string, idx, total int, progressChan chan<- progressMsg)
 	_, totalCompressed := fetchLayerSizes(image)
 
 	// 2) Get packages with sizes via Syft
-	logProgress(fmt.Sprintf("%s [%s] Scanning packages with syft...\n", prefix, image))
-	sbom := runSyftAllLayersJSON(image)
+	scanMode := "all-layers"
+	if fastMode {
+		scanMode = "squashed"
+	}
+	logProgress(fmt.Sprintf("%s [%s] Scanning packages with syft (%s)...\n", prefix, image, scanMode))
+	sbom := runSyftJSON(image, fastMode)
 
 	// 3) Build package list with sizes
 	logProgress(fmt.Sprintf("%s [%s] Processing %d packages...\n", prefix, image, len(sbom.Artifacts)))
@@ -383,8 +409,12 @@ func fetchLayerSizes(image string) ([]layerRec, int64) {
 	return layers, total
 }
 
-func runSyftAllLayersJSON(image string) syftSBOM {
-	cmd := exec.Command("syft", image, "--scope", "all-layers", "-o", "syft-json")
+func runSyftJSON(image string, fastMode bool) syftSBOM {
+	scope := "all-layers"
+	if fastMode {
+		scope = "squashed" // Much faster: only analyzes final filesystem state
+	}
+	cmd := exec.Command("syft", image, "--scope", scope, "-o", "syft-json")
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
@@ -451,11 +481,15 @@ Usage:
 Flags:
   --help, -h        Show this help message
   --version, -v     Show version information
+  --fast, -f        Fast mode: analyze only final filesystem (faster but may miss some packages)
   --csv <file>      Export package data to CSV file
 
 Examples:
   # Analyze a single image
   pkgpulse alpine:latest
+
+  # Fast analysis (2-3x faster for large images)
+  pkgpulse --fast alpine:latest
 
   # Compare multiple images
   pkgpulse alpine:latest ubuntu:latest debian:latest

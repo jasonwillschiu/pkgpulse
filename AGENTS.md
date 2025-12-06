@@ -14,10 +14,14 @@ pkgpulse/
 ├── main.go                  # Main CLI tool - image analysis logic
 ├── go.mod                   # Main project dependencies
 ├── Taskfile.yml             # Build automation (task runner)
+├── .goreleaser.yaml         # GoReleaser config for cross-platform releases
 ├── tools/
 │   └── release-tool/        # Release automation (separate Go module)
 │       ├── main.go          # version & release commands
 │       └── go.mod           # Isolated dependencies
+├── scripts/
+│   ├── install.sh           # Curl install script for quick installation
+│   └── pkgpulse.rb          # Homebrew formula template
 ├── bin/                     # Built binaries (git-ignored)
 ├── docs/
 │   └── prompt-docs-writer.md
@@ -44,13 +48,20 @@ pkgpulse/
 ### Main CLI (main.go)
 - Uses `github.com/google/go-containerregistry` for manifest fetching from any OCI registry
 - Shells out to `syft` for SBOM generation (`syft-json` format)
-- Parallel image analysis via goroutines and channels
+- Parallel image analysis via goroutines with bounded concurrency (semaphore pattern)
 - Ordered progress output via buffered progress channel
+- **Fast mode** (`--fast`/`-f`): Uses `--scope squashed` for 2-3x faster analysis
+- **Default mode**: Uses `--scope all-layers` for comprehensive analysis
 - Package size logic:
   - **Traditional packages**: APK (bytes), RPM (bytes), DEB (KB)
   - **Binary packages**: Uses artifact relationships + files array to get file sizes
   - Handles static binaries (Go, Rust, busybox, redis, postgres, etc.)
 - Single responsibility: size comparison, not vulnerability scanning
+
+### Release & Distribution
+- **GoReleaser**: Cross-platform builds (linux/darwin, amd64/arm64)
+- **Homebrew**: Formula template in `scripts/pkgpulse.rb`, auto-updated via GoReleaser
+- **Curl install**: One-liner installation via `scripts/install.sh`
 
 ### Release Tool (tools/release-tool/)
 - Parses changelog.md for version & summary
