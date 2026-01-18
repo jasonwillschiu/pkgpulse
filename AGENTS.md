@@ -56,7 +56,7 @@ pkgpulse/
 - **Cache bypass** (`--no-cache`): Skip cache, always fetch from registry
 - Native parsing:
   - **APK**: Parses `lib/apk/db/installed` text format directly
-  - **DEB**: Parses `var/lib/dpkg/status` text format directly
+  - **DEB**: Parses `var/lib/dpkg/status` (or `var/lib/dpkg/status.d/*` when split)
   - **RPM**: Uses `github.com/knqyf263/go-rpmdb` for SQLite/BDB/NDB databases
   - **Go binaries**: Uses `debug/buildinfo` for version/module detection
 - Reads image layers as tar archives to extract package databases

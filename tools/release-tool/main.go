@@ -69,6 +69,7 @@ func releaseCommand() error {
 	fmt.Printf("  Version: v%s\n", entry.Version)
 	fmt.Printf("  Title: %s\n", entry.Summary)
 
+	// CRITICAL FIX: Check for existing tag BEFORE any git operations
 	if err := ensureGitRepo(); err != nil {
 		return err
 	}
@@ -82,6 +83,7 @@ func releaseCommand() error {
 		return err
 	}
 
+	// Only after version validation passes, proceed with git operations
 	if err := gitAddAll(); err != nil {
 		return err
 	}
@@ -114,8 +116,10 @@ func parseLatestChangelogEntry() (*ChangelogEntry, error) {
 	}
 	defer file.Close()
 
+	// Allow full SemVer including optional pre-release and build metadata
+	// Examples: 1.2.3, 1.2.3-beta.1, 1.2.3+build.5, 1.2.3-beta.1+exp.sha
 	headerRegex := regexp.MustCompile(`^#\s*([0-9]+(?:\.[0-9]+){1,2}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\s*-\s*(.+)$`)
-	
+
 	scanner := bufio.NewScanner(file)
 	var entry ChangelogEntry
 	collecting := false
@@ -123,7 +127,7 @@ func parseLatestChangelogEntry() (*ChangelogEntry, error) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		if strings.HasPrefix(line, "#") {
 			matches := headerRegex.FindStringSubmatch(line)
 			if matches == nil {
@@ -137,7 +141,7 @@ func parseLatestChangelogEntry() (*ChangelogEntry, error) {
 			}
 			break
 		}
-		
+
 		if collecting {
 			trimmed := strings.TrimSpace(line)
 			if after, found := strings.CutPrefix(trimmed, "-"); found {
@@ -223,7 +227,7 @@ func gitCommitIfNeeded(summary, description string) (bool, error) {
 	if description != "" {
 		args = append(args, "-m", description)
 	}
-	
+
 	cmd = exec.Command("git", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -239,7 +243,7 @@ func gitTag(version, summary, description string) (string, error) {
 	if description != "" {
 		message = summary + "\n\n" + description
 	}
-	
+
 	cmd := exec.Command("git", "tag", "-a", tag, "-m", message)
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to create tag: %w", err)

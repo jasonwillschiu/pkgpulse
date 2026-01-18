@@ -415,7 +415,7 @@ Image 3: gcr.io/distroless/cc-debian12
 4. **Layer Extraction**: Reads image layers as tar archives to extract package databases and binaries
 5. **Native Parsing**: Directly parses package database files:
    - **APK**: Parses `lib/apk/db/installed` text format
-   - **DEB**: Parses `var/lib/dpkg/status` text format
+   - **DEB**: Parses `var/lib/dpkg/status` (or `var/lib/dpkg/status.d/*` when split)
    - **RPM**: Parses SQLite/BDB/NDB databases using native Go libraries
    - **Go binaries**: Uses `debug/buildinfo` to detect and extract metadata
 6. **Size Calculation**: Extracts installed sizes directly from package databases
@@ -429,7 +429,7 @@ The tool detects and reports sizes for:
 
 - **APK packages** (Alpine Linux) - Native parsing of installed database
 - **RPM packages** (Red Hat, Fedora, CentOS) - Native parsing of SQLite/BDB/NDB databases
-- **DEB packages** (Debian, Ubuntu) - Native parsing of dpkg status file
+- **DEB packages** (Debian, Ubuntu) - Native parsing of dpkg status file or status.d fragments
 - **Go binaries** - Native detection using `debug/buildinfo`
 - **Syft fallback** - All Syft-supported types when using `--use-syft` flag
 

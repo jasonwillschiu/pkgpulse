@@ -31,7 +31,7 @@ import (
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 )
 
-const version = "0.10.1"
+const version = "0.10.3"
 
 // Default concurrency limit for parallel image analysis
 const defaultConcurrency = 5
@@ -43,6 +43,7 @@ const defaultCatalogers = "apk,dpkg,rpm,binary"
 const (
 	apkDBPath       = "lib/apk/db/installed"
 	dpkgDBPath      = "var/lib/dpkg/status"
+	dpkgStatusDir   = "var/lib/dpkg/status.d"
 	rpmDBPathSqlite = "var/lib/rpm/rpmdb.sqlite"
 	rpmDBPathBDB    = "var/lib/rpm/Packages"
 	rpmDBPathNDB    = "var/lib/rpm/Packages.db"
@@ -596,6 +597,8 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 	// We want the final state, so read layers in order
 	// and keep only the last version of each database file
 	var apkData, dpkgData []byte
+	dpkgStatusParts := make(map[string][]byte)
+	dpkgFromStatusDir := false
 	var rpmData []byte
 	var rpmFormat string // "sqlite", "bdb", or "ndb"
 
@@ -623,6 +626,26 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 			// Normalize path (remove leading /)
 			path := strings.TrimPrefix(hdr.Name, "/")
 			path = strings.TrimPrefix(path, "./")
+
+			// Track dpkg status.d fragments (used by distroless)
+			if strings.HasPrefix(path, dpkgStatusDir+"/") {
+				base := filepath.Base(path)
+				if target, found := strings.CutPrefix(base, ".wh."); found {
+					if base == ".wh..wh..opq" {
+						for k := range dpkgStatusParts {
+							delete(dpkgStatusParts, k)
+						}
+					} else {
+						delete(dpkgStatusParts, filepath.Join(dpkgStatusDir, target))
+					}
+					continue
+				}
+				if hdr.Typeflag == tar.TypeReg && !strings.HasSuffix(base, ".md5sums") {
+					data, _ := io.ReadAll(tr)
+					dpkgStatusParts[path] = data
+				}
+				continue
+			}
 
 			// Check for whiteout (deletion marker)
 			if whiteoutBase, found := strings.CutPrefix(path, ".wh."); found {
@@ -680,6 +703,12 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 	// Parse the databases we found
 	var packages []pkg
 
+	if len(dpkgData) == 0 && len(dpkgStatusParts) > 0 {
+		logProgress(fmt.Sprintf("Found dpkg status.d entries (%d), combining...", len(dpkgStatusParts)))
+		dpkgData = combineDpkgStatusParts(dpkgStatusParts)
+		dpkgFromStatusDir = true
+	}
+
 	if len(apkData) > 0 {
 		logProgress("Found APK database, parsing...")
 		pkgs := parseAPKDB(apkData)
@@ -688,7 +717,7 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 	}
 	if len(dpkgData) > 0 {
 		logProgress("Found dpkg database, parsing...")
-		pkgs := parseDpkgDB(dpkgData)
+		pkgs := parseDpkgDB(dpkgData, dpkgFromStatusDir)
 		packages = append(packages, pkgs...)
 		logProgress(fmt.Sprintf("Found %d deb packages", len(pkgs)))
 	}
@@ -875,11 +904,40 @@ func parseAPKDB(data []byte) []pkg {
 	return packages
 }
 
-// parseDpkgDB parses Debian's /var/lib/dpkg/status format
-func parseDpkgDB(data []byte) []pkg {
+func combineDpkgStatusParts(parts map[string][]byte) []byte {
+	if len(parts) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(parts))
+	for k := range parts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var combined bytes.Buffer
+	for _, k := range keys {
+		data := parts[k]
+		if len(data) == 0 {
+			continue
+		}
+		combined.Write(data)
+		if !bytes.HasSuffix(data, []byte("\n")) {
+			combined.WriteByte('\n')
+		}
+		combined.WriteByte('\n')
+	}
+
+	return combined.Bytes()
+}
+
+// parseDpkgDB parses Debian's /var/lib/dpkg/status format.
+// If assumeInstalled is true, entries without a Status line are treated as installed.
+func parseDpkgDB(data []byte, assumeInstalled bool) []pkg {
 	var packages []pkg
 	var current pkg
 	var isInstalled bool
+	var statusSeen bool
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
@@ -887,11 +945,12 @@ func parseDpkgDB(data []byte) []pkg {
 
 		if line == "" {
 			// End of package entry
-			if current.Name != "" && isInstalled {
+			if current.Name != "" && (isInstalled || (assumeInstalled && !statusSeen)) {
 				packages = append(packages, current)
 			}
 			current = pkg{Type: "deb"}
 			isInstalled = false
+			statusSeen = false
 			continue
 		}
 
@@ -921,11 +980,12 @@ func parseDpkgDB(data []byte) []pkg {
 		case "Status":
 			// Only count installed packages
 			isInstalled = strings.Contains(value, "installed")
+			statusSeen = true
 		}
 	}
 
 	// Don't forget last package
-	if current.Name != "" && isInstalled {
+	if current.Name != "" && (isInstalled || (assumeInstalled && !statusSeen)) {
 		packages = append(packages, current)
 	}
 

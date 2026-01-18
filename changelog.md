@@ -1,3 +1,9 @@
+# 0.10.3 - Fix: Treat status.d entries as installed when Status is missing
+- Parse dpkg status.d fragments that omit the Status field (distroless-style images)
+
+# 0.10.2 - Add: Native parsing of dpkg status.d fragments
+- Support split dpkg metadata in `var/lib/dpkg/status.d/*` (distroless-style images)
+
 # 0.10.1 - Fix: Version constant mismatch
 - Fixed version constant to match git tag (was showing 0.9.0)
 
