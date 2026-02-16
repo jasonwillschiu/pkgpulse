@@ -9,7 +9,7 @@ A CLI tool for analyzing and comparing container image sizes and package content
 - **Detailed Size Metrics**: Shows both compressed (pull) size and installed (on-disk) size
 - **Package Breakdown**: Lists all packages with their individual sizes, including binary packages
 - **Multi-Image Comparison**: Side-by-side comparison table when analyzing multiple images
-- **CSV Export**: Export package data for further analysis
+- **CSV Export**: Export package data or full comparison tables for further analysis
 - **Universal Registry Support**: Works with any OCI-compliant registry across many major cloud providers and registries
 - **Binary Package Support**: Detects and reports sizes for static binaries (Go, Rust, etc.) in addition to traditional packages (APK, RPM, DEB)
 - **Easy Installation**: Install via curl script, Homebrew, or go install
@@ -151,6 +151,13 @@ Export package data to CSV:
 pkgpulse alpine:latest --csv packages.csv
 ```
 
+For multi-image comparisons, `--csv` exports:
+- A summary comparison block (image/source/compressed/installed/packages)
+- The full package version + size comparison table
+- Sanitized image-ref-based column names (with hash suffixes if needed to avoid collisions)
+
+When comparing more than 3 images, pkgpulse automatically writes `pkgpulse.csv` in the current directory if `--csv` is not provided.
+
 ### Using the Built Binary
 
 ```bash
@@ -250,7 +257,6 @@ For a single image, the tool displays:
 ### Multiple Images
 
 When comparing multiple images, you get:
-- Individual breakdowns for each image
 - **Summary Comparison Table**: Quick overview of sizes and package counts
 - **Package Version & Size Comparison**: Side-by-side comparison showing which packages are present in each image, their versions, and sizes
 

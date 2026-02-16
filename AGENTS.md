@@ -60,6 +60,12 @@ pkgpulse/
   - **RPM**: Uses `github.com/knqyf263/go-rpmdb` for SQLite/BDB/NDB databases
   - **Go binaries**: Uses `debug/buildinfo` for version/module detection
 - Reads image layers as tar archives to extract package databases
+- **CSV behavior**:
+  - Single image with `--csv`: package rows (`package,version,installed_MB`)
+  - Multi-image with `--csv`: summary block + full comparison matrix
+  - Missing package cells in comparison CSV use `-`
+  - Comparison CSV uses sanitized image-ref column names with collision-safe suffixes
+  - Auto-export `pkgpulse.csv` when comparing >3 images (unless `--csv` is provided)
 - Package size logic:
   - **Traditional packages**: APK (bytes), RPM (bytes), DEB (KB)
   - **Go binaries**: File size from tar headers

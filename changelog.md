@@ -1,3 +1,9 @@
+# 0.11.0 - Add: Full comparison CSV export and automatic CSV for large comparisons
+- `--csv` now exports the full comparison table for multi-image runs (summary block + package matrix)
+- Comparison CSV columns use sanitized image-reference names with collision-safe hash suffixes
+- Missing package entries in comparison CSV are emitted as `-`
+- Comparing more than 3 images now auto-exports `pkgpulse.csv` when `--csv` is not provided
+
 # 0.10.3 - Fix: Treat status.d entries as installed when Status is missing
 - Parse dpkg status.d fragments that omit the Status field (distroless-style images)
 

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,7 @@ import (
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 )
 
-const version = "0.10.3"
+const version = "0.11.0"
 
 // Default concurrency limit for parallel image analysis
 const defaultConcurrency = 5
@@ -49,6 +50,10 @@ const (
 	rpmDBPathNDB    = "var/lib/rpm/Packages.db"
 )
 
+var busyBoxVersionRe = regexp.MustCompile(`BusyBox v([0-9][0-9A-Za-z.+~:_-]*)`)
+var debianGLIBCVersionRe = regexp.MustCompile(`\(Debian GLIBC ([^)]+)\)`)
+var glibcSymbolVersionRe = regexp.MustCompile(`GLIBC_([0-9]+(?:\.[0-9]+){1,2})`)
+
 // Cache metadata stored alongside tarball
 type cacheEntry struct {
 	ImageRef  string    `json:"image_ref"`
@@ -62,7 +67,7 @@ type pkg struct {
 	Name    string
 	Version string
 	SizeKB  int64
-	Type    string // "apk", "deb", "rpm"
+	Type    string // "apk", "deb", "rpm", "binary"
 }
 
 /* ---- Minimal Syft JSON we need (syft-json schema) - for fallback ---- */
@@ -114,6 +119,12 @@ type imageResult struct {
 type progressMsg struct {
 	idx int
 	msg string
+}
+
+type comparisonCell struct {
+	Version string
+	MB      float64
+	Present bool
 }
 
 /* ---- Cache functions ---- */
@@ -465,11 +476,29 @@ func main() {
 		displayImageBreakdown(results[0])
 	}
 
-	if csvOut != "" {
-		if err := writeCSV(csvOut, results[0].Rows); err != nil {
-			log.Fatalf("write CSV: %v", err)
+	csvPath := csvOut
+	autoCSV := false
+	if csvPath == "" && len(results) > 3 {
+		csvPath = "pkgpulse.csv"
+		autoCSV = true
+	}
+
+	if csvPath != "" {
+		if len(results) > 1 {
+			if err := writeComparisonCSV(csvPath, results); err != nil {
+				log.Fatalf("write comparison CSV: %v", err)
+			}
+			if autoCSV {
+				fmt.Printf("\nWrote CSV automatically: %s (summary + comparison table)\n", csvPath)
+			} else {
+				fmt.Printf("\nWrote CSV: %s (summary + comparison table)\n", csvPath)
+			}
+		} else {
+			if err := writePackageCSV(csvPath, results[0].Rows); err != nil {
+				log.Fatalf("write CSV: %v", err)
+			}
+			fmt.Printf("\nWrote CSV: %s (package,version,installed_MB)\n", csvPath)
 		}
-		fmt.Printf("\nWrote CSV: %s (package,version,installed_MB)\n", csvOut)
 	}
 }
 
@@ -648,9 +677,14 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 			}
 
 			// Check for whiteout (deletion marker)
-			if whiteoutBase, found := strings.CutPrefix(path, ".wh."); found {
+			if whiteoutBase, found := strings.CutPrefix(filepath.Base(path), ".wh."); found {
+				removedPath := whiteoutBase
+				if dir := filepath.Dir(path); dir != "." {
+					removedPath = filepath.Join(dir, whiteoutBase)
+				}
+
 				// This is a whiteout - file was deleted
-				switch whiteoutBase {
+				switch removedPath {
 				case apkDBPath:
 					apkData = nil
 				case dpkgDBPath:
@@ -663,7 +697,7 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 					rpmData = nil
 				}
 				// Also handle whiteout of binaries
-				delete(goBinaries, whiteoutBase)
+				delete(goBinaries, removedPath)
 				continue
 			}
 
@@ -728,10 +762,10 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 		logProgress(fmt.Sprintf("Found %d RPM packages", len(pkgs)))
 	}
 
-	// If no OS packages found, try to detect Go binaries
+	// If no OS packages found, inspect executable binaries in final filesystem state.
 	if len(packages) == 0 && len(goBinaries) > 0 {
-		logProgress(fmt.Sprintf("No OS packages, checking %d binaries for Go...", len(goBinaries)))
-		packages = append(packages, detectGoBinaries(img, goBinaries)...)
+		logProgress(fmt.Sprintf("No OS packages, checking %d binaries...", len(goBinaries)))
+		packages = append(packages, detectBinaryPackages(img, goBinaries)...)
 	}
 
 	return packages
@@ -784,17 +818,19 @@ func parseRPMDB(data []byte, format string) []pkg {
 	return packages
 }
 
-// detectGoBinaries checks executable files for Go build info
-func detectGoBinaries(img v1.Image, candidates map[string]int64) []pkg {
+// detectBinaryPackages inspects executable files and emits binary packages.
+func detectBinaryPackages(img v1.Image, candidates map[string]int64) []pkg {
 	var packages []pkg
+	seenNames := make(map[string]struct{})
 
 	layers, err := img.Layers()
 	if err != nil {
 		return nil
 	}
 
-	// Read each candidate binary and check if it's a Go binary
-	for _, layer := range layers {
+	// Read layers in reverse so the first match is the final file version.
+	for i := len(layers) - 1; i >= 0 && len(candidates) > 0; i-- {
+		layer := layers[i]
 		rc, err := layer.Uncompressed()
 		if err != nil {
 			continue
@@ -824,17 +860,37 @@ func detectGoBinaries(img v1.Image, candidates map[string]int64) []pkg {
 				continue
 			}
 
-			// Try to read Go build info
-			info, err := buildinfo.Read(bytes.NewReader(data))
-			if err != nil {
-				continue // Not a Go binary
+			name := filepath.Base(path)
+			version := "-"
+
+			// BusyBox applets may be named as individual commands ("[", "sh", etc.).
+			// Normalize these to a single "busybox" package when signature is present.
+			if match := busyBoxVersionRe.FindSubmatch(data); len(match) > 1 {
+				name = "busybox"
+				version = string(match[1])
 			}
 
-			// Extract binary name and version
-			name := filepath.Base(path)
-			version := info.GoVersion
-			if info.Main.Version != "" && info.Main.Version != "(devel)" {
-				version = info.Main.Version
+			if _, exists := seenNames[name]; exists {
+				delete(candidates, path)
+				continue
+			}
+			seenNames[name] = struct{}{}
+
+			// Try Go build info first.
+			if info, err := buildinfo.Read(bytes.NewReader(data)); err == nil {
+				version = info.GoVersion
+				if info.Main.Version != "" && info.Main.Version != "(devel)" {
+					version = info.Main.Version
+				}
+			} else if name == "getconf" {
+				// libc-bin/getconf embeds glibc version strings in binaries.
+				if match := debianGLIBCVersionRe.FindSubmatch(data); len(match) > 1 {
+					version = string(match[1])
+				} else {
+					if match := glibcSymbolVersionRe.FindSubmatch(data); len(match) > 1 {
+						version = string(match[1])
+					}
+				}
 			}
 
 			packages = append(packages, pkg{
@@ -1089,6 +1145,8 @@ func displayImageBreakdown(result imageResult) {
 }
 
 func displayComparisonTable(results []imageResult) {
+	pkgNames, cells := buildComparisonMatrix(results)
+
 	// Summary comparison
 	fmt.Println("Summary Comparison:")
 	fmt.Printf("%-50s %8s %15s %15s %10s\n", "Image", "Source", "Compressed", "Installed", "Packages")
@@ -1104,21 +1162,6 @@ func displayComparisonTable(results []imageResult) {
 	}
 	fmt.Println()
 
-	// Collect all unique package names
-	allPackages := make(map[string]bool)
-	for _, result := range results {
-		for pkg := range result.PackageMap {
-			allPackages[pkg] = true
-		}
-	}
-
-	// Convert to sorted slice
-	pkgNames := make([]string, 0, len(allPackages))
-	for pkg := range allPackages {
-		pkgNames = append(pkgNames, pkg)
-	}
-	sort.Strings(pkgNames)
-
 	// Build header
 	fmt.Println("Package Version & Size Comparison:")
 	header := fmt.Sprintf("%-40s", "Package")
@@ -1132,9 +1175,9 @@ func displayComparisonTable(results []imageResult) {
 	// Display packages
 	for _, pkg := range pkgNames {
 		line := fmt.Sprintf("%-40s", trunc(pkg, 40))
-		for _, result := range results {
-			if r, found := result.PackageMap[pkg]; found {
-				line += fmt.Sprintf(" | %-18s %8.2f", trunc(r.Ver, 18), r.MB)
+		for _, cell := range cells[pkg] {
+			if cell.Present {
+				line += fmt.Sprintf(" | %-18s %8.2f", trunc(cell.Version, 18), cell.MB)
 			} else {
 				line += fmt.Sprintf(" | %-18s %8s", "-", "-")
 			}
@@ -1148,7 +1191,90 @@ func displayComparisonTable(results []imageResult) {
 	}
 }
 
-func writeCSV(path string, rows []row) (err error) {
+func buildComparisonMatrix(results []imageResult) ([]string, map[string][]comparisonCell) {
+	allPackages := make(map[string]bool)
+	for _, result := range results {
+		for pkgName := range result.PackageMap {
+			allPackages[pkgName] = true
+		}
+	}
+
+	pkgNames := make([]string, 0, len(allPackages))
+	for pkgName := range allPackages {
+		pkgNames = append(pkgNames, pkgName)
+	}
+	sort.Strings(pkgNames)
+
+	cells := make(map[string][]comparisonCell, len(pkgNames))
+	for _, pkgName := range pkgNames {
+		rowCells := make([]comparisonCell, len(results))
+		for i, result := range results {
+			if r, found := result.PackageMap[pkgName]; found {
+				rowCells[i] = comparisonCell{
+					Version: r.Ver,
+					MB:      r.MB,
+					Present: true,
+				}
+			}
+		}
+		cells[pkgName] = rowCells
+	}
+
+	return pkgNames, cells
+}
+
+func sanitizeImageColumnName(s string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isAlnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if isAlnum {
+			if c >= 'A' && c <= 'Z' {
+				c = c + ('a' - 'A')
+			}
+			b.WriteByte(c)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+
+	name := strings.Trim(b.String(), "_")
+	if name == "" {
+		return "image"
+	}
+	return name
+}
+
+func shortHash(s string, n int) string {
+	h := sha256.Sum256([]byte(s))
+	hexStr := hex.EncodeToString(h[:])
+	if n <= 0 || n > len(hexStr) {
+		return hexStr
+	}
+	return hexStr[:n]
+}
+
+func buildCSVImageColumns(results []imageResult) []string {
+	columns := make([]string, len(results))
+	seen := make(map[string]int)
+	for i, r := range results {
+		base := sanitizeImageColumnName(r.Image)
+		seen[base]++
+		if seen[base] == 1 {
+			columns[i] = base
+			continue
+		}
+		columns[i] = fmt.Sprintf("%s_%s", base, shortHash(r.Image, 8))
+	}
+	return columns
+}
+
+func writePackageCSV(path string, rows []row) (err error) {
 	f, createErr := os.Create(path)
 	if createErr != nil {
 		return createErr
@@ -1168,6 +1294,78 @@ func writeCSV(path string, rows []row) (err error) {
 			return err
 		}
 	}
+	return w.Error()
+}
+
+func writeComparisonCSV(path string, results []imageResult) (err error) {
+	f, createErr := os.Create(path)
+	if createErr != nil {
+		return createErr
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	// Summary block
+	if err := w.Write([]string{"section", "summary"}); err != nil {
+		return err
+	}
+	if err := w.Write([]string{"image", "source", "compressed_MB", "installed_MB", "packages"}); err != nil {
+		return err
+	}
+	for _, r := range results {
+		compressed := "-"
+		if r.CompressedMB > 0 {
+			compressed = fmt.Sprintf("%.2f", r.CompressedMB)
+		}
+		if err := w.Write([]string{
+			r.Image,
+			r.Source,
+			compressed,
+			fmt.Sprintf("%.2f", r.InstalledMB),
+			strconv.Itoa(r.PackageCount),
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Separator + package comparison block
+	if err := w.Write([]string{}); err != nil {
+		return err
+	}
+	if err := w.Write([]string{"section", "packages"}); err != nil {
+		return err
+	}
+
+	imageCols := buildCSVImageColumns(results)
+	header := []string{"package"}
+	for _, col := range imageCols {
+		header = append(header, col+"_version", col+"_installed_MB")
+	}
+	if err := w.Write(header); err != nil {
+		return err
+	}
+
+	pkgNames, cells := buildComparisonMatrix(results)
+	for _, pkgName := range pkgNames {
+		out := []string{pkgName}
+		for _, cell := range cells[pkgName] {
+			if cell.Present {
+				out = append(out, cell.Version, fmt.Sprintf("%.2f", cell.MB))
+			} else {
+				out = append(out, "-", "-")
+			}
+		}
+		if err := w.Write(out); err != nil {
+			return err
+		}
+	}
+
 	return w.Error()
 }
 
@@ -1233,6 +1431,9 @@ Examples:
 
   # Export to CSV
   pkgpulse alpine:latest --csv packages.csv
+
+  # Auto-export CSV when comparing more than 3 images
+  pkgpulse alpine:latest debian:12 ubuntu:24.04 busybox:latest
 
   # Use syft for edge cases (Rust binaries, unusual formats)
   pkgpulse --use-syft some-image:latest
