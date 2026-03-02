@@ -1,6 +1,9 @@
+# 0.12.3 - Update: Readme installation v0.12.3
+- Update version to include v, which was needed
+
 # 0.12.2 - Update: Readme installation 0.12.2
 - Update README version for installation 
-- 
+
 # 0.12.1 - Update: Migrate release automation to global mdrelease
 - Replaced Taskfile release/version commands to use global `mdrelease`
 - Removed local `tools/release-tool` module in favor of shared cross-project tooling
