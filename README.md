@@ -66,7 +66,7 @@ brew install pkgpulse
 Requires Go 1.25+:
 
 ```bash
-go install github.com/jasonwillschiu/pkgpulse@latest
+go install github.com/jasonwillschiu/pkgpulse@0.12.2
 ```
 
 The binary will be installed to `~/go/bin/pkgpulse` (ensure `~/go/bin` is in your `$PATH`).
