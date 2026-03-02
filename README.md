@@ -6,6 +6,7 @@ A CLI tool for analyzing and comparing container image sizes and package content
 
 - **Parallel Analysis**: Analyze multiple container images concurrently (bounded concurrency for stability)
 - **Local Image Cache**: Automatic tarball-based caching for instant repeated analysis
+- **Live Progress Feedback**: Single-line live redraw with stage updates and download byte progress during long operations
 - **Detailed Size Metrics**: Shows both compressed (pull) size and installed (on-disk) size
 - **Package Breakdown**: Lists all packages with their individual sizes, including binary packages
 - **Multi-Image Comparison**: Side-by-side comparison table when analyzing multiple images
@@ -428,6 +429,11 @@ Image 3: gcr.io/distroless/cc-debian12
 7. **Syft Fallback**: Optionally invokes `syft` with `--use-syft` flag for compatibility
 8. **Parallel Processing**: Analyzes multiple images concurrently for faster comparisons
 9. **Output Formatting**: Presents data in human-readable tables with aligned columns
+
+Progress Reporting:
+- Single-line redraw on stderr to show active image stage
+- Live byte counters during registry downloads (`downloaded / estimated total MB`)
+- Stage heartbeats for cache load/save/reload and native parsing
 
 ## Package Types Supported
 

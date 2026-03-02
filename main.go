@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/glebarez/go-sqlite" // SQLite driver for RPM DB
@@ -116,9 +118,187 @@ type imageResult struct {
 	Source       string // "local" or "remote"
 }
 
-type progressMsg struct {
-	idx int
-	msg string
+type progressEvent struct {
+	idx       int
+	total     int
+	image     string
+	stage     string
+	message   string
+	current   int64
+	totalSize int64
+	rateBps   float64
+	done      bool
+}
+
+type imageProgressState struct {
+	image     string
+	stage     string
+	message   string
+	current   int64
+	totalSize int64
+	rateBps   float64
+	done      bool
+	updatedAt time.Time
+}
+
+type progressReadCloser struct {
+	io.ReadCloser
+	onRead func(int)
+}
+
+func (p *progressReadCloser) Read(b []byte) (int, error) {
+	n, err := p.ReadCloser.Read(b)
+	if n > 0 && p.onRead != nil {
+		p.onRead(n)
+	}
+	return n, err
+}
+
+type progressTransport struct {
+	base    http.RoundTripper
+	onBytes func(int64)
+}
+
+func (t *progressTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Body == nil || t.onBytes == nil {
+		return resp, nil
+	}
+	if req.Method != http.MethodGet {
+		return resp, nil
+	}
+	resp.Body = &progressReadCloser{
+		ReadCloser: resp.Body,
+		onRead: func(n int) {
+			t.onBytes(int64(n))
+		},
+	}
+	return resp, nil
+}
+
+func stageLabel(stage string) string {
+	switch stage {
+	case "resolving":
+		return "resolving image"
+	case "cache_load":
+		return "loading cache"
+	case "manifest":
+		return "fetching manifest"
+	case "downloading":
+		return "downloading"
+	case "cache_save":
+		return "saving cache"
+	case "cache_reload":
+		return "reloading cache"
+	case "parsing":
+		return "parsing packages"
+	case "syft":
+		return "running syft"
+	case "processing":
+		return "processing output"
+	case "done":
+		return "done"
+	default:
+		return stage
+	}
+}
+
+func formatBytesMB(n int64) float64 {
+	return float64(n) / (1024.0 * 1024.0)
+}
+
+func buildProgressLine(idx, total, done int, s imageProgressState) string {
+	line := fmt.Sprintf("[%d/%d] %s | %s", idx+1, total, trunc(s.image, 28), stageLabel(s.stage))
+
+	if s.stage == "downloading" {
+		currentMB := formatBytesMB(s.current)
+		if s.totalSize > 0 {
+			totalMB := formatBytesMB(s.totalSize)
+			line += fmt.Sprintf(" %.1f/%.1f MB", currentMB, totalMB)
+		} else {
+			line += fmt.Sprintf(" %.1f MB", currentMB)
+		}
+		if s.rateBps > 0 {
+			line += fmt.Sprintf(" (%.1f MB/s)", s.rateBps/(1024.0*1024.0))
+		}
+	} else if s.totalSize > 0 {
+		line += fmt.Sprintf(" %d/%d", s.current, s.totalSize)
+	}
+
+	if s.message != "" && s.stage != "downloading" {
+		line += " - " + trunc(s.message, 40)
+	}
+	if s.done {
+		line += " | done"
+	}
+	line += fmt.Sprintf(" | overall %d/%d", done, total)
+	return line
+}
+
+func runProgressRenderer(progressChan <-chan progressEvent, total int, done chan<- struct{}) {
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+
+	states := make([]imageProgressState, total)
+	for i := range states {
+		states[i].stage = "queued"
+	}
+
+	printed := false
+	render := func() {
+		doneCount := 0
+		for _, s := range states {
+			if s.done {
+				doneCount++
+			}
+		}
+
+		if printed && total > 0 {
+			fmt.Fprintf(os.Stderr, "\033[%dA", total)
+		}
+
+		for i := range states {
+			line := buildProgressLine(i, total, doneCount, states[i])
+			fmt.Fprintf(os.Stderr, "\033[2K\r%s\n", line)
+		}
+		printed = true
+	}
+
+	closed := false
+	for !closed {
+		select {
+		case ev, ok := <-progressChan:
+			if !ok {
+				closed = true
+				break
+			}
+			if ev.idx < 0 || ev.idx >= total {
+				continue
+			}
+			states[ev.idx] = imageProgressState{
+				image:     ev.image,
+				stage:     ev.stage,
+				message:   ev.message,
+				current:   ev.current,
+				totalSize: ev.totalSize,
+				rateBps:   ev.rateBps,
+				done:      ev.done,
+				updatedAt: time.Now(),
+			}
+			render()
+		case <-ticker.C:
+			render()
+		}
+	}
+	render()
+	done <- struct{}{}
 }
 
 type comparisonCell struct {
@@ -409,17 +589,10 @@ func main() {
 	// Semaphore to limit concurrent goroutines
 	sem := make(chan struct{}, defaultConcurrency)
 
-	// Channel for ordered progress output
-	progressChan := make(chan progressMsg, 100)
-	doneChan := make(chan bool)
-
-	// Progress printer goroutine - prints messages immediately
-	go func() {
-		for msg := range progressChan {
-			fmt.Fprint(os.Stderr, msg.msg)
-		}
-		doneChan <- true
-	}()
+	// Channel for single-line progress renderer
+	progressChan := make(chan progressEvent, 256)
+	doneChan := make(chan struct{})
+	go runProgressRenderer(progressChan, len(images), doneChan)
 
 	// Build mode description for output
 	modeStr := ""
@@ -431,9 +604,9 @@ func main() {
 	}
 
 	if len(images) > 1 {
-		fmt.Fprintf(os.Stderr, "Analyzing %d images in parallel%s...\n\n", len(images), modeStr)
+		fmt.Fprintf(os.Stderr, "Analyzing %d images in parallel%s...\n", len(images), modeStr)
 	} else if modeStr != "" {
-		fmt.Fprintf(os.Stderr, "Analyzing%s...\n\n", modeStr)
+		fmt.Fprintf(os.Stderr, "Analyzing%s...\n", modeStr)
 	}
 
 	for i, image := range images {
@@ -442,10 +615,10 @@ func main() {
 			defer wg.Done()
 			sem <- struct{}{}        // Acquire semaphore
 			defer func() { <-sem }() // Release semaphore
-			logFunc := func(msg progressMsg) {
-				progressChan <- msg
+			send := func(ev progressEvent) {
+				progressChan <- ev
 			}
-			result := analyzeImage(img, idx, len(images), logFunc, useSyft, noCache)
+			result := analyzeImage(img, idx, len(images), send, useSyft, noCache)
 			results[idx] = result
 		}(i, image)
 	}
@@ -455,7 +628,6 @@ func main() {
 	<-doneChan
 
 	// Print completion summary
-	fmt.Fprintf(os.Stderr, "\n")
 	for i, img := range images {
 		fmt.Fprintf(os.Stderr, "[%d/%d] ✓ %s\n", i+1, len(images), img)
 	}
@@ -502,28 +674,76 @@ func main() {
 	}
 }
 
-func analyzeImage(image string, idx, total int, sendProgress func(progressMsg), useSyft bool, noCache bool) imageResult {
-	prefix := fmt.Sprintf("[%d/%d]", idx+1, total)
-	if total == 1 {
-		prefix = ""
-	}
-
-	logProgress := func(msg string) {
-		sendProgress(progressMsg{idx: idx, msg: msg})
+func analyzeImage(image string, idx, total int, sendProgress func(progressEvent), useSyft bool, noCache bool) imageResult {
+	emit := func(stage, message string, current, totalSize int64, rateBps float64, done bool) {
+		sendProgress(progressEvent{
+			idx:       idx,
+			total:     total,
+			image:     image,
+			stage:     stage,
+			message:   message,
+			current:   current,
+			totalSize: totalSize,
+			rateBps:   rateBps,
+			done:      done,
+		})
 	}
 
 	// Parse image reference
+	emit("resolving", "parsing image reference", 0, 0, 0, false)
 	ref, err := name.ParseReference(image)
 	check(err)
 
 	var img v1.Image
 	var totalCompressed int64
+	var sourceRemote bool
 	source := "cache"
+
+	var downloadedBytes atomic.Int64
+	var estimatedTotalBytes atomic.Int64
+	stopDownloadProgress := make(chan struct{})
+	downloadProgressStopped := make(chan struct{})
+	var stopDownloadOnce sync.Once
+
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		defer close(downloadProgressStopped)
+		lastBytes := int64(0)
+		lastTick := time.Now()
+		for {
+			select {
+			case <-stopDownloadProgress:
+				return
+			case <-ticker.C:
+				current := downloadedBytes.Load()
+				now := time.Now()
+				delta := current - lastBytes
+				rate := 0.0
+				if dt := now.Sub(lastTick).Seconds(); dt > 0 {
+					rate = float64(delta) / dt
+				}
+				lastBytes = current
+				lastTick = now
+				if current > 0 {
+					emit("downloading", "pulling image bytes", current, estimatedTotalBytes.Load(), rate, false)
+				}
+			}
+		}
+	}()
+	stopDownload := func() {
+		stopDownloadOnce.Do(func() {
+			close(stopDownloadProgress)
+			<-downloadProgressStopped
+		})
+	}
+	defer stopDownload()
 
 	// Try cache first (unless --no-cache or --use-syft)
 	if !noCache && !useSyft {
+		emit("cache_load", "checking local cache", 0, 0, 0, false)
 		if cachedImg, _, ok := loadFromCache(image, func(msg string) {
-			logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+			emit("cache_load", msg, 0, 0, 0, false)
 		}); ok {
 			img = cachedImg
 		}
@@ -531,32 +751,49 @@ func analyzeImage(image string, idx, total int, sendProgress func(progressMsg), 
 
 	// Fetch from registry if not in cache
 	if img == nil {
-		logProgress(fmt.Sprintf("%s [%s] Fetching from registry...\n", prefix, image))
-		remoteImg, remoteErr := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain))
+		sourceRemote = true
+		emit("manifest", "fetching from registry", 0, 0, 0, false)
+		transport := &progressTransport{
+			base: http.DefaultTransport,
+			onBytes: func(n int64) {
+				downloadedBytes.Add(n)
+			},
+		}
+		opts := []remote.Option{
+			remote.WithAuthFromKeychain(authn.DefaultKeychain),
+			remote.WithTransport(transport),
+		}
+		remoteImg, remoteErr := remote.Image(ref, opts...)
 		check(remoteErr)
 		source = "remote"
 
 		// Get compressed size from manifest
 		manifest, err := remoteImg.Manifest()
 		check(err)
+		totalCompressed += manifest.Config.Size
 		for _, l := range manifest.Layers {
 			totalCompressed += l.Size
 		}
+		estimatedTotalBytes.Store(totalCompressed)
+		emit("downloading", "pulling image bytes", downloadedBytes.Load(), totalCompressed, 0, false)
 
 		// Save to cache and reload for consistent fast analysis
 		if !noCache && !useSyft {
+			emit("cache_save", "writing cache tarball", 0, 0, 0, false)
 			if err := saveToCache(image, remoteImg, func(msg string) {
-				logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+				emit("cache_save", msg, 0, 0, 0, false)
 			}); err != nil {
-				logProgress(fmt.Sprintf("%s [%s] Cache save failed: %v\n", prefix, image, err))
+				emit("cache_save", fmt.Sprintf("cache save failed: %v", err), 0, 0, 0, false)
 				img = remoteImg // Fall back to remote image if cache fails
 			} else {
 				// Reload from cache for fast parallel analysis
+				emit("cache_reload", "reloading from cache", 0, 0, 0, false)
 				if cachedImg, _, ok := loadFromCache(image, func(msg string) {
-					logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+					emit("cache_reload", msg, 0, 0, 0, false)
 				}); ok {
 					img = cachedImg
 					source = "cached"
+					sourceRemote = false
 				} else {
 					img = remoteImg
 				}
@@ -570,16 +807,21 @@ func analyzeImage(image string, idx, total int, sendProgress func(progressMsg), 
 
 	if useSyft {
 		// Fallback to syft
-		logProgress(fmt.Sprintf("%s [%s] Scanning with syft...\n", prefix, image))
+		stopDownload()
+		emit("syft", "running syft scan", 0, 0, 0, false)
 		packages = runSyftAndParse(image)
 	} else {
 		// Native parsing
-		packages = extractPackagesFromImage(img, func(msg string) {
-			logProgress(fmt.Sprintf("%s [%s] %s\n", prefix, image, msg))
+		emit("parsing", "extracting package databases", 0, 0, 0, false)
+		packages = extractPackagesFromImage(img, func(message string, currentLayer, totalLayers int64) {
+			emit("parsing", message, currentLayer, totalLayers, 0, false)
 		})
+		if sourceRemote {
+			stopDownload()
+		}
 	}
 
-	logProgress(fmt.Sprintf("%s [%s] Processing %d packages...\n", prefix, image, len(packages)))
+	emit("processing", fmt.Sprintf("processing %d packages", len(packages)), int64(len(packages)), int64(len(packages)), 0, false)
 
 	// Build output rows
 	rows := make([]row, 0, len(packages))
@@ -600,6 +842,7 @@ func analyzeImage(image string, idx, total int, sendProgress func(progressMsg), 
 	}
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].MB > rows[j].MB })
+	emit("done", "completed", 0, 0, 0, true)
 
 	return imageResult{
 		Image:        image,
@@ -613,7 +856,7 @@ func analyzeImage(image string, idx, total int, sendProgress func(progressMsg), 
 }
 
 // extractPackagesFromImage reads package databases from image layers
-func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
+func extractPackagesFromImage(img v1.Image, logProgress func(message string, currentLayer, totalLayers int64)) []pkg {
 	layers, err := img.Layers()
 	if err != nil {
 		log.Printf("Warning: could not get layers: %v", err)
@@ -621,7 +864,7 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 	}
 
 	totalLayers := len(layers)
-	logProgress(fmt.Sprintf("Scanning %d layers...", totalLayers))
+	logProgress(fmt.Sprintf("scanning %d layers", totalLayers), 0, int64(totalLayers))
 
 	// We want the final state, so read layers in order
 	// and keep only the last version of each database file
@@ -635,7 +878,7 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 	goBinaries := make(map[string]int64) // path -> size
 
 	for i, layer := range layers {
-		logProgress(fmt.Sprintf("Layer %d/%d...", i+1, totalLayers))
+		logProgress(fmt.Sprintf("layer %d/%d", i+1, totalLayers), int64(i+1), int64(totalLayers))
 
 		rc, err := layer.Uncompressed()
 		if err != nil {
@@ -738,33 +981,33 @@ func extractPackagesFromImage(img v1.Image, logProgress func(string)) []pkg {
 	var packages []pkg
 
 	if len(dpkgData) == 0 && len(dpkgStatusParts) > 0 {
-		logProgress(fmt.Sprintf("Found dpkg status.d entries (%d), combining...", len(dpkgStatusParts)))
+		logProgress(fmt.Sprintf("combining %d dpkg status.d entries", len(dpkgStatusParts)), int64(totalLayers), int64(totalLayers))
 		dpkgData = combineDpkgStatusParts(dpkgStatusParts)
 		dpkgFromStatusDir = true
 	}
 
 	if len(apkData) > 0 {
-		logProgress("Found APK database, parsing...")
+		logProgress("parsing apk database", int64(totalLayers), int64(totalLayers))
 		pkgs := parseAPKDB(apkData)
 		packages = append(packages, pkgs...)
-		logProgress(fmt.Sprintf("Found %d APK packages", len(pkgs)))
+		logProgress(fmt.Sprintf("found %d apk packages", len(pkgs)), int64(totalLayers), int64(totalLayers))
 	}
 	if len(dpkgData) > 0 {
-		logProgress("Found dpkg database, parsing...")
+		logProgress("parsing dpkg database", int64(totalLayers), int64(totalLayers))
 		pkgs := parseDpkgDB(dpkgData, dpkgFromStatusDir)
 		packages = append(packages, pkgs...)
-		logProgress(fmt.Sprintf("Found %d deb packages", len(pkgs)))
+		logProgress(fmt.Sprintf("found %d deb packages", len(pkgs)), int64(totalLayers), int64(totalLayers))
 	}
 	if len(rpmData) > 0 {
-		logProgress(fmt.Sprintf("Found RPM database (%s), parsing...", rpmFormat))
+		logProgress(fmt.Sprintf("parsing rpm database (%s)", rpmFormat), int64(totalLayers), int64(totalLayers))
 		pkgs := parseRPMDB(rpmData, rpmFormat)
 		packages = append(packages, pkgs...)
-		logProgress(fmt.Sprintf("Found %d RPM packages", len(pkgs)))
+		logProgress(fmt.Sprintf("found %d rpm packages", len(pkgs)), int64(totalLayers), int64(totalLayers))
 	}
 
 	// If no OS packages found, inspect executable binaries in final filesystem state.
 	if len(packages) == 0 && len(goBinaries) > 0 {
-		logProgress(fmt.Sprintf("No OS packages, checking %d binaries...", len(goBinaries)))
+		logProgress(fmt.Sprintf("checking %d executable binaries", len(goBinaries)), int64(totalLayers), int64(totalLayers))
 		packages = append(packages, detectBinaryPackages(img, goBinaries)...)
 	}
 

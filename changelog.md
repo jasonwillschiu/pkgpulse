@@ -1,3 +1,8 @@
+# 0.12.0 - Add: Live updates for each image comparison
+- Added internal single-line live progress renderer for image analysis
+- Added staged progress updates across cache load/save/reload and native parsing
+- Added internal registry download byte tracking (`downloaded / estimated total`) with live throughput updates
+
 # 0.11.0 - Add: Full comparison CSV export and automatic CSV for large comparisons
 - `--csv` now exports the full comparison table for multi-image runs (summary block + package matrix)
 - Comparison CSV columns use sanitized image-reference names with collision-safe hash suffixes

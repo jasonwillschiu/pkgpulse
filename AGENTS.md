@@ -51,7 +51,7 @@ pkgpulse/
 - **Default mode**: Native package database parsing (no external dependencies)
 - **Syft fallback** (`--use-syft`): Shells out to syft for SBOM generation
 - Parallel image analysis via goroutines with bounded concurrency (semaphore pattern)
-- Immediate progress output (not buffered/ordered)
+- Single-line live progress redraw with stage heartbeats and download-byte updates
 - **Cache-first architecture**: Checks local tarball cache before fetching
 - **Cache bypass** (`--no-cache`): Skip cache, always fetch from registry
 - Native parsing:
