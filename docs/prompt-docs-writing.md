@@ -88,6 +88,8 @@ Base all updates on:
 - Major changes → Expand relevant sections with details
 - Minor changes → Add 1-2 line summary in appropriate section
 - This is the **canonical detailed reference** — CLAUDE.md and AGENTS.md point here
+- In install snippets, use explicit `go install ...@vX.Y.Z` versions, never `@latest`
+- Keep the install version aligned with the project's current release version
 
 ---
 
@@ -182,6 +184,7 @@ Base all updates on:
 - Bullets: 1-5 items (match the scope)
 - **Placement:** Always insert new entries at the top
 - **Historical entries:** Keep them exactly as they are
+- Treat changelog version as a source for distributable versioning (embed or sync at build time)
 
 ---
 
@@ -252,12 +255,16 @@ Datastar is a lightweight hypermedia framework for SSE-based UI updates.
 2. Evaluate impact → Determine if docs need updates
 3. Update affected files:
    → README: Expand or summarize based on change size
+      - Ensure `go install` examples use concrete release version, not `@latest`
    → CLAUDE.md: Only add what LLMs can't infer (invariants, non-standard tools, key paths)
    → AGENTS.md: Terse bullet constraints only
    → changelog: New entry at top with 1-5 bullets
-4. Calculate version bump → Apply SemVer decision tree
-5. Output results → Show updates, summarize, state version bump
-6. Stop → Developer handles git operations
+4. Ensure version wiring is current:
+   → App should expose the current version (from embedded/sourced changelog data or build-time injection)
+   → Build/release flow should update version metadata automatically
+5. Calculate version bump → Apply SemVer decision tree
+6. Output results → Show updates, summarize, state version bump
+7. Stop → Developer handles git operations
 ```
 
 ---

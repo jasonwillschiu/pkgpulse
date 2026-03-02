@@ -1,3 +1,8 @@
+# 0.12.4 - Update: Docs prompt and version sync
+- Updated docs writer prompt with explicit versioning guidance
+- Synced README `go install` example to the current release version
+- Synced CLI `--version` output with changelog version
+
 # 0.12.3 - Update: Readme installation v0.12.3
 - Update version to include v, which was needed
 
