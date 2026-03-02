@@ -15,10 +15,6 @@ pkgpulse/
 ├── go.mod                   # Main project dependencies
 ├── Taskfile.yml             # Build automation (task runner)
 ├── .goreleaser.yaml         # GoReleaser config for cross-platform releases
-├── tools/
-│   └── release-tool/        # Release automation (separate Go module)
-│       ├── main.go          # version & release commands
-│       └── go.mod           # Isolated dependencies
 ├── scripts/
 │   ├── install.sh           # Curl install script for quick installation
 │   └── pkgpulse.rb          # Homebrew formula template
@@ -39,7 +35,7 @@ pkgpulse/
 - **External dependencies**: Optional `syft` (with `--use-syft` flag), `gopls` for development
 - **Go version**: 1.25+ (see go.mod)
 - **Build system**: Taskfile for automation (task runner)
-- **Release tool**: Separate Go module in `tools/release-tool/` for portability
+- **Release tool**: Global `mdrelease` CLI (changelog-driven release automation)
 - **Cache system**: Local tarball cache in `$XDG_CACHE_HOME/pkgpulse` or `~/.cache/pkgpulse`
 - **Documentation**: 3 docs maintained: README.md, AGENTS.md, changelog.md
 - **Community files**: MIT LICENSE, CODE_OF_CONDUCT, CONTRIBUTING
@@ -84,17 +80,17 @@ pkgpulse/
 - **Homebrew**: Formula template in `scripts/pkgpulse.rb`, auto-updated via GoReleaser
 - **Curl install**: One-liner installation via `scripts/install.sh`
 
-### Release Tool (tools/release-tool/)
+### Release Tool (mdrelease)
 - Parses changelog.md for version & summary
 - Supports full SemVer (pre-release, build metadata)
-- Commands: `version` (print latest), `release` (tag & push)
+- Commands: `mdrelease version` (print latest), `mdrelease` (full release flow)
 - Git workflow: add → commit → tag → push
-- Standalone Go module - can be extracted to separate repo later
+- Shared global tool used across projects
 
 ## File Locations
 
 - **Main logic**: `main.go` (all-in-one CLI)
-- **Tool scripts**: `tools/release-tool/` (versioning automation)
+- **Release automation**: global `mdrelease` binary (invoked from Taskfile)
 - **Built binaries**: `bin/` (git-ignored, built on demand)
 - **Documentation**: `README.md` (users), `AGENTS.md` (agents), `changelog.md` (versions)
 
@@ -103,7 +99,6 @@ pkgpulse/
 ### Always
 - Use structured error handling (`check()`, explicit returns)
 - Sort packages by size descending for display
-- Maintain separate go.mod for tools/release-tool/
 - Update all 3 docs (README, AGENTS, changelog) when adding features
 - Use `go-containerregistry` for image operations (registry + tarball)
 - Use native parsing by default, syft only with `--use-syft` flag
@@ -115,7 +110,6 @@ pkgpulse/
 
 ### Never
 - Add dependencies without updating go.mod/go.sum
-- Mix release-tool and main CLI concerns
 - Commit binaries to git (bin/ is ignored)
 - Shell to docker/podman - use `go-containerregistry` for all image ops
 - Assume package size format - handle APK/RPM/DEB/binary differences explicitly

@@ -1,3 +1,8 @@
+# 0.12.1 - Update: Migrate release automation to global mdrelease
+- Replaced Taskfile release/version commands to use global `mdrelease`
+- Removed local `tools/release-tool` module in favor of shared cross-project tooling
+- Updated README, AGENTS, and CONTRIBUTING docs to reflect the new release workflow
+
 # 0.12.0 - Add: Live updates for each image comparison
 - Added internal single-line live progress renderer for image analysis
 - Added staged progress updates across cache load/save/reload and native parsing

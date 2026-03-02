@@ -52,7 +52,7 @@ Reviews may include questions or requests for changes. Pull requests will be mer
 ```
 pkgpulse/
 ├── main.go              # Main CLI - keep it simple & single-file
-├── tools/release-tool/  # Separate Go module for versioning
+├── Taskfile.yml         # Build, lint, and release shortcuts
 ├── README.md            # User docs
 ├── AGENTS.md            # AI/dev guidelines
 └── changelog.md         # Version history

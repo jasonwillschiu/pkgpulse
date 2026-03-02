@@ -41,17 +41,10 @@ tasks:
       - mkdir -p bin
       - go build -o bin/pkgpulse .
 
-  build-release-tool:
-    desc: Build the release automation tool
-    cmds:
-      - mkdir -p bin
-      - cd tools/release-tool && go build -o ../../bin/release-tool .
-
   build-all:
-    desc: Build both pkgpulse and release-tool
+    desc: Build all local binaries
     deps:
       - build
-      - build-release-tool
 
   clean:
     desc: Remove built binaries
@@ -61,9 +54,9 @@ tasks:
   version:
     desc: Get the latest version from changelog.md
     cmds:
-      - ./bin/release-tool version
+      - mdrelease version
 
   release:
     desc: Create git tag and push using the latest changelog entry
     cmds:
-      - ./bin/release-tool release
+      - mdrelease

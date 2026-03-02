@@ -463,6 +463,11 @@ The tool detects and reports sizes for:
   go install golang.org/x/tools/gopls@latest
   ```
 
+- [mdrelease](https://github.com/jasonwillschiu/mdrelease) - Changelog-driven release automation tool
+  ```bash
+  go install github.com/jasonwillschiu/mdrelease@latest
+  ```
+
 ### Available Tasks
 
 ```bash
@@ -477,7 +482,7 @@ task test
 
 # Build binaries
 task build          # Main CLI tool
-task build-all      # All binaries including release-tool
+task build-all      # Alias for building local binaries
 
 # Run gopls diagnostics
 task gopls-check    # Catches modernization patterns
