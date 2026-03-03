@@ -34,7 +34,7 @@ import (
 	rpmdb "github.com/knqyf263/go-rpmdb/pkg"
 )
 
-const version = "0.12.4"
+const version = "0.12.5"
 
 // Default concurrency limit for parallel image analysis
 const defaultConcurrency = 5

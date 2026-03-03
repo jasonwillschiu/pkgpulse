@@ -1,265 +1,103 @@
 # pkgpulse
 
-A CLI tool for analyzing and comparing container image sizes and package contents using SBOM (Software Bill of Materials) data. Ideal for evaluating small production images like distroless, minimal base images, and micro containers.
+Need help deciding which container image to use? Find out image and package sizes, then compare them side by side. Great for picking a small and capable runtime image. Answer your own question, should I use distroless, wolfi or scratch, see what's inside and how big the base image is.
 
-## Features
+## Quick Start
 
-- **Parallel Analysis**: Analyze multiple container images concurrently (bounded concurrency for stability)
-- **Local Image Cache**: Automatic tarball-based caching for instant repeated analysis
-- **Live Progress Feedback**: Single-line live redraw with stage updates and download byte progress during long operations
-- **Detailed Size Metrics**: Shows both compressed (pull) size and installed (on-disk) size
-- **Package Breakdown**: Lists all packages with their individual sizes, including binary packages
-- **Multi-Image Comparison**: Side-by-side comparison table when analyzing multiple images
-- **CSV Export**: Export package data or full comparison tables for further analysis
-- **Universal Registry Support**: Works with any OCI-compliant registry across many major cloud providers and registries
-- **Binary Package Support**: Detects and reports sizes for static binaries (Go, Rust, etc.) in addition to traditional packages (APK, RPM, DEB)
-- **Easy Installation**: Install via curl script, Homebrew, or go install
+```bash
+# Install (requires Go 1.25+)
+go install github.com/jasonwillschiu/pkgpulse@v0.12.5
 
-## Dependencies
+# Analyze a single image
+pkgpulse alpine:latest
 
-### Required
-
-- **Go 1.25+** - For building the application
-  ```bash
-  # Check your version
-  go version
-  ```
-
-
-### Optional
-
-- **[Syft](https://github.com/anchore/syft)** - SBOM fallback (only needed with `--use-syft` flag)
-  ```bash
-  # Install via Homebrew (macOS/Linux)
-  brew install syft
-
-  # Or via curl
-  curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-  ```
-
-### Go Dependencies
-
-The following Go modules are automatically managed via `go.mod`:
-- `github.com/google/go-containerregistry` - Container registry client and tarball operations
-- `github.com/glebarez/go-sqlite` - SQLite driver for RPM databases
-- `github.com/knqyf263/go-rpmdb` - Native RPM database parser
+# Compare multiple images
+pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
+```
 
 ## Installation
 
-### Option 1: Curl install (Quick start)
+### Homebrew (macOS/Linux)
 
 ```bash
-# Install pkgpulse
-curl -sSL https://raw.githubusercontent.com/jasonwillschiu/pkgpulse/main/scripts/install.sh | sh
-```
-
-### Option 2: Homebrew (macOS/Linux)
-
-```bash
-# Add the tap and install
 brew tap jasonwillschiu/tap
 brew install pkgpulse
 ```
 
-### Option 3: Using go install
-
-Requires Go 1.25+:
+### Curl install
 
 ```bash
-go install github.com/jasonwillschiu/pkgpulse@v0.12.4
+curl -sSL https://raw.githubusercontent.com/jasonwillschiu/pkgpulse/main/scripts/install.sh | sh
 ```
 
-The binary will be installed to `~/go/bin/pkgpulse` (ensure `~/go/bin` is in your `$PATH`).
-
-### Option 4: Build from source
+### Build from source
 
 ```bash
-# Clone the repository
 git clone https://github.com/jasonwillschiu/pkgpulse
 cd pkgpulse
-
-# Install Go dependencies
 go mod download
-
-# Build the binary
 go build -o pkgpulse main.go
-
-# Optionally install to PATH
 sudo mv pkgpulse /usr/local/bin/
 ```
 
 ## Usage
 
-### Basic Usage
+### Analyze and compare
 
-Analyze a single image:
 ```bash
+# Single image - see pull size, installed size, and every package
 pkgpulse cgr.dev/chainguard/wolfi-base
-```
 
-Compare multiple images:
-```bash
+# Multiple images - get a side-by-side comparison table
 pkgpulse cgr.dev/chainguard/wolfi-base redhat/ubi9-micro gcr.io/distroless/cc-debian12
 ```
 
-### Image Cache
+### Image cache
 
-By default, pkgpulse caches images locally as tarballs for instant repeated analysis:
+Images are cached locally as tarballs for instant repeated analysis:
 ```bash
-# First run: fetches from registry and caches
-pkgpulse alpine:latest
-
-# Second run: loads from cache (instant)
-pkgpulse alpine:latest
-
-# Disable cache for fresh pull
-pkgpulse --no-cache alpine:latest
+pkgpulse alpine:latest            # first run fetches and caches
+pkgpulse alpine:latest            # second run loads from cache (instant)
+pkgpulse --no-cache alpine:latest # skip cache for a fresh pull
 ```
 
-### Syft Fallback
+### Cache management
 
-By default, pkgpulse uses native package database parsing. To use syft instead (requires syft installed):
 ```bash
-# Use syft for SBOM generation
-pkgpulse --use-syft python:3.12
-```
-
-Native parsing is faster and has no external dependencies, but syft fallback is available for compatibility.
-
-### Cache Management
-
-Manage the local image cache:
-```bash
-# List cached images
-pkgpulse cache list
-
-# Show cache directory path
-pkgpulse cache path
-
-# Remove specific image from cache
-pkgpulse cache rm alpine:latest
-
-# Clear entire cache
-pkgpulse cache clear
+pkgpulse cache list               # list cached images
+pkgpulse cache path               # show cache directory
+pkgpulse cache rm alpine:latest   # remove specific image
+pkgpulse cache clear              # clear entire cache
 ```
 
 Cache location follows XDG Base Directory specification (`$XDG_CACHE_HOME/pkgpulse` or `~/.cache/pkgpulse`).
 
-### CSV Export
+### CSV export
 
-Export package data to CSV:
 ```bash
 pkgpulse alpine:latest --csv packages.csv
 ```
 
-For multi-image comparisons, `--csv` exports:
-- A summary comparison block (image/source/compressed/installed/packages)
-- The full package version + size comparison table
-- Sanitized image-ref-based column names (with hash suffixes if needed to avoid collisions)
+For multi-image comparisons, `--csv` exports a summary comparison block and the full package version + size comparison table. When comparing more than 3 images, pkgpulse automatically writes `pkgpulse.csv` if `--csv` is not provided.
 
-When comparing more than 3 images, pkgpulse automatically writes `pkgpulse.csv` in the current directory if `--csv` is not provided.
+### Syft fallback
 
-### Using the Built Binary
-
+By default, pkgpulse uses native package database parsing (no external dependencies). To use [Syft](https://github.com/anchore/syft) instead:
 ```bash
-# Show help
-pkgpulse --help
-
-# Show version
-pkgpulse --version
-
-# Analyze images
-pkgpulse cgr.dev/chainguard/wolfi-base
+pkgpulse --use-syft python:3.12
 ```
 
-## Supported Registries
+## Features
 
-This tool works with **any OCI-compliant container registry**. Below are examples of tested and supported registries:
-
-### Tested Registries
-
-The following registries have been verified to work:
-
-| Registry | Example Image | Notes |
-|----------|---------------|-------|
-| **Docker Hub** | `docker.io/library/alpine:latest` or `alpine:latest` | Default registry, prefix optional |
-| **Google Container Registry (GCR)** | `gcr.io/distroless/static-debian12:latest` | Google Cloud Platform |
-| **GitHub Container Registry (GHCR)** | `ghcr.io/distroless/static:latest` | GitHub Packages |
-| **Quay.io** | `quay.io/prometheus/node-exporter:latest` | Red Hat's container registry |
-| **Kubernetes Registry** | `registry.k8s.io/pause:3.9` | Official Kubernetes images |
-| **Chainguard Registry (CGR)** | `cgr.dev/chainguard/wolfi-base` | Minimal, secure images |
-
-### Additional Supported Registries
-
-These registries follow OCI standards and should work without issues:
-
-| Registry | Example Format | Provider |
-|----------|----------------|----------|
-| **Amazon ECR Public** | `public.ecr.aws/amazonlinux/amazonlinux:latest` | AWS Public Gallery |
-| **Amazon ECR Private** | `<account-id>.dkr.ecr.<region>.amazonaws.com/my-image:tag` | AWS Private Registry (requires auth) |
-| **Azure Container Registry (ACR)** | `<registry-name>.azurecr.io/my-image:tag` | Microsoft Azure (requires auth) |
-| **Google Artifact Registry** | `<region>-docker.pkg.dev/<project>/<repo>/image:tag` | Google Cloud (newer than GCR) |
-| **GitLab Container Registry** | `registry.gitlab.com/<namespace>/<project>:tag` | GitLab CI/CD |
-| **JFrog Artifactory** | `<server>.jfrog.io/<repo>/image:tag` | Enterprise artifact management |
-| **Harbor** | `<harbor-host>/library/image:tag` | Self-hosted registry |
-| **Nexus Repository** | `<nexus-host>:<port>/repository/<repo>/image:tag` | Sonatype Nexus |
-| **DigitalOcean Registry** | `registry.digitalocean.com/<namespace>/image:tag` | DigitalOcean (requires auth) |
-| **IBM Cloud Registry** | `<region>.icr.io/<namespace>/image:tag` | IBM Cloud (requires auth) |
-| **Oracle Cloud (OCIR)** | `<region>.ocir.io/<tenancy>/image:tag` | Oracle Cloud (requires auth) |
-| **Alibaba Cloud Registry** | `registry.<region>.aliyuncs.com/<namespace>/image:tag` | Alibaba Cloud (requires auth) |
-| **Tencent Cloud Registry** | `ccr.ccs.tencentyun.com/<namespace>/image:tag` | Tencent Cloud (requires auth) |
-
-### Authentication
-
-For private registries, ensure you're authenticated using Docker/Podman credentials:
-
-```bash
-# Docker Hub or other registries
-docker login <registry-url>
-
-# Or use credential helpers
-export DOCKER_CONFIG=~/.docker
-```
-
-The tool uses the same authentication as Docker/Podman from your local credential store.
-
-### Registry Format Examples
-
-```bash
-# Docker Hub (default registry)
-pkgpulse nginx:alpine
-pkgpulse docker.io/library/nginx:alpine
-
-# Google registries
-pkgpulse gcr.io/distroless/base
-pkgpulse us-docker.pkg.dev/my-project/my-repo/my-image:v1.0
-
-# AWS ECR Public
-pkgpulse public.ecr.aws/nginx/nginx:alpine
-
-# Multiple registries in one comparison
-pkgpulse \
-  alpine:latest \
-  gcr.io/distroless/static:latest \
-  quay.io/prometheus/alertmanager:latest \
-  ghcr.io/homeassistant/home-assistant:stable
-```
-
-## Output
-
-### Single Image
-
-For a single image, the tool displays:
-- Compressed size (download/pull size)
-- Installed size (on-disk size after extraction)
-- Total package count
-- Detailed package list sorted by size (largest first)
-
-### Multiple Images
-
-When comparing multiple images, you get:
-- **Summary Comparison Table**: Quick overview of sizes and package counts
-- **Package Version & Size Comparison**: Side-by-side comparison showing which packages are present in each image, their versions, and sizes
+- **Detailed Size Metrics** - Compressed (pull) size and installed (on-disk) size
+- **Package Breakdown** - Every package listed with its individual size
+- **Multi-Image Comparison** - Side-by-side comparison table across images
+- **Parallel Analysis** - Multiple images analyzed concurrently
+- **Local Image Cache** - Tarball-based caching for instant repeated analysis
+- **Live Progress** - Stage updates and download byte progress during long operations
+- **CSV Export** - Export package data or full comparison tables
+- **Binary Package Support** - Detects Go, Rust, and other static binaries alongside traditional packages (APK, RPM, DEB)
+- **Universal Registry Support** - Works with any OCI-compliant registry
 
 ## Example Output
 
@@ -407,99 +245,100 @@ Image 2: redhat/ubi9-micro
 Image 3: gcr.io/distroless/cc-debian12
 ```
 
-## Use Cases
+## Supported Registries
 
-- **Image Selection**: Compare minimal base images to choose the smallest for your application
-- **Size Optimization**: Identify which packages contribute most to image size
-- **Distro Comparison**: Compare package ecosystems across different Linux distributions
-- **Supply Chain**: Maintain SBOM awareness for compliance and security
+Works with **any OCI-compliant container registry**, including Docker Hub, GCR, GHCR, Quay.io, Amazon ECR, Azure ACR, and more.
+
+```bash
+# Docker Hub (default registry)
+pkgpulse nginx:alpine
+
+# Google registries
+pkgpulse gcr.io/distroless/base
+
+# AWS ECR Public
+pkgpulse public.ecr.aws/nginx/nginx:alpine
+
+# Compare across registries
+pkgpulse alpine:latest gcr.io/distroless/static:latest quay.io/prometheus/alertmanager:latest
+```
+
+For private registries, authenticate with `docker login <registry-url>`. The tool uses your local Docker/Podman credential store.
+
+<details>
+<summary>Full registry compatibility list</summary>
+
+| Registry | Example Image | Notes |
+|----------|---------------|-------|
+| **Docker Hub** | `alpine:latest` | Default registry, prefix optional |
+| **Google Container Registry (GCR)** | `gcr.io/distroless/static-debian12:latest` | Google Cloud Platform |
+| **GitHub Container Registry (GHCR)** | `ghcr.io/distroless/static:latest` | GitHub Packages |
+| **Quay.io** | `quay.io/prometheus/node-exporter:latest` | Red Hat's container registry |
+| **Kubernetes Registry** | `registry.k8s.io/pause:3.9` | Official Kubernetes images |
+| **Chainguard Registry (CGR)** | `cgr.dev/chainguard/wolfi-base` | Minimal, secure images |
+| **Amazon ECR Public** | `public.ecr.aws/amazonlinux/amazonlinux:latest` | AWS Public Gallery |
+| **Amazon ECR Private** | `<account-id>.dkr.ecr.<region>.amazonaws.com/my-image:tag` | Requires auth |
+| **Azure Container Registry** | `<registry-name>.azurecr.io/my-image:tag` | Requires auth |
+| **Google Artifact Registry** | `<region>-docker.pkg.dev/<project>/<repo>/image:tag` | Newer than GCR |
+| **GitLab Container Registry** | `registry.gitlab.com/<namespace>/<project>:tag` | GitLab CI/CD |
+| **JFrog Artifactory** | `<server>.jfrog.io/<repo>/image:tag` | Enterprise |
+| **Harbor** | `<harbor-host>/library/image:tag` | Self-hosted |
+| **Nexus Repository** | `<nexus-host>:<port>/repository/<repo>/image:tag` | Sonatype Nexus |
+| **DigitalOcean Registry** | `registry.digitalocean.com/<namespace>/image:tag` | Requires auth |
+| **IBM Cloud Registry** | `<region>.icr.io/<namespace>/image:tag` | Requires auth |
+| **Oracle Cloud (OCIR)** | `<region>.ocir.io/<tenancy>/image:tag` | Requires auth |
+| **Alibaba Cloud Registry** | `registry.<region>.aliyuncs.com/<namespace>/image:tag` | Requires auth |
+| **Tencent Cloud Registry** | `ccr.ccs.tencentyun.com/<namespace>/image:tag` | Requires auth |
+
+</details>
 
 ## How It Works
 
-1. **Cache Check**: Checks local tarball cache for previously fetched images
-2. **Image Fetch**: If not cached, fetches from OCI registry via `go-containerregistry`
-3. **Cache Storage**: Saves image as tarball with metadata (digest, timestamp, size)
-4. **Layer Extraction**: Reads image layers as tar archives to extract package databases and binaries
-5. **Native Parsing**: Directly parses package database files:
-   - **APK**: Parses `lib/apk/db/installed` text format
-   - **DEB**: Parses `var/lib/dpkg/status` (or `var/lib/dpkg/status.d/*` when split)
-   - **RPM**: Parses SQLite/BDB/NDB databases using native Go libraries
-   - **Go binaries**: Uses `debug/buildinfo` to detect and extract metadata
-6. **Size Calculation**: Extracts installed sizes directly from package databases
-7. **Syft Fallback**: Optionally invokes `syft` with `--use-syft` flag for compatibility
-8. **Parallel Processing**: Analyzes multiple images concurrently for faster comparisons
-9. **Output Formatting**: Presents data in human-readable tables with aligned columns
+1. Checks local tarball cache (or fetches from registry if not cached)
+2. Reads image layers as tar archives to extract package databases
+3. Natively parses APK, DEB, RPM databases and detects Go binaries
+4. Calculates compressed and installed sizes
+5. Presents results in formatted tables (or CSV)
 
-Progress Reporting:
-- Single-line redraw on stderr to show active image stage
-- Live byte counters during registry downloads (`downloaded / estimated total MB`)
-- Stage heartbeats for cache load/save/reload and native parsing
-
-## Package Types Supported
-
-The tool detects and reports sizes for:
-
-- **APK packages** (Alpine Linux) - Native parsing of installed database
-- **RPM packages** (Red Hat, Fedora, CentOS) - Native parsing of SQLite/BDB/NDB databases
-- **DEB packages** (Debian, Ubuntu) - Native parsing of dpkg status file or status.d fragments
-- **Go binaries** - Native detection using `debug/buildinfo`
-- **Syft fallback** - All Syft-supported types when using `--use-syft` flag
+Supports APK (Alpine), RPM (Red Hat/Fedora/CentOS), DEB (Debian/Ubuntu), Go binaries, and all Syft-supported types via `--use-syft`.
 
 ## Development
 
 ### Prerequisites
 
-- [Task](https://taskfile.dev) - Build automation tool
-  ```bash
-  # Install via Homebrew (macOS/Linux)
-  brew install go-task
-  
-  # Or via Go
-  go install github.com/go-task/task/v3/cmd/task@latest
-  ```
-
-- [gopls](https://pkg.go.dev/golang.org/x/tools/gopls) - Go language server for enhanced linting
-  ```bash
-  go install golang.org/x/tools/gopls@latest
-  ```
-
-- [mdrelease](https://github.com/jasonwillschiu/mdrelease) - Changelog-driven release automation tool
-  ```bash
-  go install github.com/jasonwillschiu/mdrelease@latest
-  ```
+- **Go 1.25+**
+- [Task](https://taskfile.dev) - `brew install go-task`
+- [gopls](https://pkg.go.dev/golang.org/x/tools/gopls) - `go install golang.org/x/tools/gopls@latest`
+- [mdrelease](https://github.com/jasonwillschiu/mdrelease) - `go install github.com/jasonwillschiu/mdrelease@latest`
 
 ### Available Tasks
 
 ```bash
-# View all available tasks
-task --list
-
-# Format, vet, and lint code
-task lint
-
-# Run tests
-task test
-
-# Build binaries
-task build          # Main CLI tool
-task build-all      # Alias for building local binaries
-
-# Run gopls diagnostics
-task gopls-check    # Catches modernization patterns
-
-# Clean build artifacts
-task clean
+task --list        # view all tasks
+task lint          # format, vet, and lint
+task test          # run tests
+task build         # build CLI binary
+task gopls-check   # modernization diagnostics
+task clean         # clean build artifacts
 ```
 
 ### Code Quality
 
-The project uses multiple linting tools:
-- `go fmt` - Standard Go formatting
-- `go vet` - Go's built-in static analyzer
-- `golangci-lint` - Comprehensive linting suite
-- `gopls` - Language server diagnostics (modernization checks)
+- `go fmt` - standard formatting
+- `go vet` - built-in static analyzer
+- `golangci-lint` - comprehensive linting
+- `gopls` - language server diagnostics
 
 Run `task lint` to execute all checks.
+
+### Dependencies
+
+Managed via `go.mod`:
+- `github.com/google/go-containerregistry` - container registry client
+- `github.com/glebarez/go-sqlite` - SQLite driver for RPM databases
+- `github.com/knqyf263/go-rpmdb` - native RPM database parser
+
+Optional: [Syft](https://github.com/anchore/syft) (only needed with `--use-syft` flag)
 
 ## License
 

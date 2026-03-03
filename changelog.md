@@ -1,3 +1,8 @@
+# 0.12.5 - Update: Streamline README
+- Rewrote README for clarity: added Quick Start, condensed sections
+- Moved registry list into collapsible details block
+- Reordered installation methods (Homebrew first)
+
 # 0.12.4 - Update: Docs prompt and version sync
 - Updated docs writer prompt with explicit versioning guidance
 - Synced README `go install` example to the current release version
