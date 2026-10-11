@@ -15,14 +15,13 @@ Contributions are welcome via pull requests.
 
 ### Before Submitting a Pull Request
 
-Run the following checks and ensure they pass:
+Run the full quality gate and ensure it passes (there is no CI, so this is the check):
 
 ```bash
-task lint
-task build
+task check   # lint (fmt, vet, golangci-lint, gopls) + race-enabled tests + build
 ```
 
-Fix all errors and warnings before submitting. Test your changes to verify the tool works as expected.
+Fix all errors and warnings before submitting. Add or extend tests in `main_test.go` for behavior changes, and try your change against real images.
 
 Update documentation as needed:
 - `README.md` for user-facing changes
@@ -52,7 +51,8 @@ Reviews may include questions or requests for changes. Pull requests will be mer
 ```
 pkgpulse/
 ├── main.go              # Main CLI - keep it simple & single-file
-├── Taskfile.yml         # Build, lint, and release shortcuts
+├── main_test.go         # Unit tests
+├── Taskfile.yml         # Build, lint, test, and release shortcuts
 ├── README.md            # User docs
 ├── AGENTS.md            # AI/dev guidelines
 └── changelog.md         # Version history
@@ -62,8 +62,8 @@ pkgpulse/
 
 - **Main tool stays in `main.go`** - single-file CLI design
 - **Use `go-containerregistry`** for registry operations (never shell to docker)
-- **Shell out to `syft` only** - parse JSON output (`-o syft-json`)
-- **Structured errors**: Use explicit error handling
+- **Native parsing first** - package databases are parsed directly from image layers; `syft` is only an opt-in fallback (`--use-syft`, parsed from `-o syft-json`)
+- **Structured errors**: Return errors explicitly; never exit from inside per-image workers
 - **Sort output**: Packages by size descending
 - **Follow existing patterns**: Check how similar features are implemented
 
@@ -79,7 +79,10 @@ Discuss new features in an issue before implementation. Ensure the feature align
 Documentation improvements including typo fixes, clarity enhancements, and additional examples are welcome. Issues are not required for documentation-only changes.
 
 ### Testing
-Test coverage improvements and additional test cases are encouraged.
+Test coverage improvements and additional test cases are encouraged. Layer and whiteout behavior can be tested without a registry by building in-memory images (see `testImage` in `main_test.go`).
+
+### Distribution
+pkgpulse is distributed as source only (`go install` or build from source). Please don't add prebuilt-binary tooling such as GoReleaser, Homebrew formulas, install scripts, or CI workflows.
 
 ## Questions
 

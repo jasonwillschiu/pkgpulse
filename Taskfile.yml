@@ -1,5 +1,11 @@
 version: "3"
 
+vars:
+  # Latest version from changelog.md, embedded into binaries via -ldflags
+  VERSION:
+    sh: sed -n 's/^# \([0-9][^ ]*\) - .*/\1/p' changelog.md | head -1
+  LDFLAGS: -X main.version={{.VERSION}}
+
 tasks:
   default:
     cmds:
@@ -16,35 +22,50 @@ tasks:
       - go vet ./...
 
   lint:
-    desc: Run golangci-lint and gopls diagnostics
+    desc: Run go fmt, go vet, golangci-lint and gopls diagnostics (fails on any finding)
     deps:
       - fmt
       - vet
     cmds:
       - golangci-lint run ./...
-      - find . -name "*.go" -type f | xargs gopls check -severity=hint || true
-    ignore_error: true
+      - task: gopls-check
 
   gopls-check:
     desc: Run gopls diagnostics only (includes modernize analyzer)
     cmds:
-      - find . -name "*.go" -type f | xargs gopls check -severity=hint
+      # gopls exits 0 even when it reports diagnostics, so fail on any output
+      - |
+        out=$(find . -name "*.go" -type f -not -path "./bin/*" | xargs gopls check -severity=hint)
+        if [ -n "$out" ]; then echo "$out"; exit 1; fi
 
   test:
-    desc: Run tests
+    desc: Run tests with the race detector
     cmds:
-      - go test -v ./...
+      - go test -race ./...
 
   build:
-    desc: Build the pkgpulse CLI tool
+    desc: Build the pkgpulse CLI into bin/
     cmds:
       - mkdir -p bin
-      - go build -o bin/pkgpulse .
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/pkgpulse .
 
-  build-all:
-    desc: Build all local binaries
-    deps:
-      - build
+  install:
+    desc: Install pkgpulse into $GOBIN (or $GOPATH/bin)
+    cmds:
+      - go install -ldflags "{{.LDFLAGS}}" .
+
+  check:
+    desc: Run every quality gate (lint, test, build) - run before committing or releasing
+    cmds:
+      - task: lint
+      - task: test
+      - task: build
+
+  deps:
+    desc: Upgrade direct dependencies and tidy go.mod/go.sum
+    cmds:
+      - go get -u $(go list -m -f '{{"{{"}}if not (or .Indirect .Main){{"}}"}}{{"{{"}}.Path{{"}}"}}{{"{{"}}end{{"}}"}}' all)
+      - go mod tidy
 
   clean:
     desc: Remove built binaries
@@ -57,6 +78,7 @@ tasks:
       - mdrelease version
 
   release:
-    desc: Create git tag and push using the latest changelog entry
+    desc: Run all checks, then tag and push using the latest changelog entry
     cmds:
+      - task: check
       - mdrelease

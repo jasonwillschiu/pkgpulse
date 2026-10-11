@@ -1,1 +1,9 @@
 /bin
+/pkgpulse
+
+# OS files
+.DS_Store
+
+# CSV exports written by pkgpulse (auto-export and examples)
+pkgpulse.csv
+pkgpulse-*.csv

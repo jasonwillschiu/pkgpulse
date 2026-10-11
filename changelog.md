@@ -1,3 +1,26 @@
+# 0.13.0 - Add: Platform selection, JSON output, cache freshness, and parser fixes
+- Added `--platform` (default `linux/amd64`), `--json`, `--top N`, and `--jobs N` flags
+- Cached tags are re-verified against the registry (cheap HEAD, at most hourly) and refetched when they move; digest references are never rechecked
+- Cache keys are normalized (`alpine` = `docker.io/library/alpine:latest`) and include the platform; cache writes are atomic. Existing cache entries are not reused and will be refetched once
+- `cache rm` removes all platforms of an image and reports when nothing was cached; `cache list` is sorted and shows the platform
+- One failing image no longer aborts the run: other images are still reported, failures are listed, and the exit code is 1 (2 for usage errors)
+- Fixed layer whiteout handling: directory whiteouts, opaque directories, and paths replaced by symlinks now remove lower-layer package databases and binaries
+- Fixed Wolfi/Chainguard images (usr-merged `usr/lib/apk/db/installed`) and Fedora 36+/openSUSE (`usr/lib/sysimage/rpm`) reporting binaries instead of packages
+- Fixed dpkg counting `not-installed`, `config-files`, and `half-installed` packages
+- Fixed silent truncation of package databases with lines over 64 KiB
+- Fixed compressed size showing N/A for cached images
+- Fixed `--no-cache` downloading binary-only images twice
+- Fixed Go binaries that mention BusyBox being reported as busybox
+- Sizes are tracked in bytes so sub-KB packages are no longer dropped; same-name packages (multi-arch debs, multiple RPM versions) are merged so totals match the tables
+- Output order is deterministic (size, then name); progress uses plain lines when stderr is not a terminal
+- Stricter argument parsing: unknown flags and missing flag values are errors; duplicate images are analyzed once
+- Auto-exported CSV never overwrites an existing file (`pkgpulse-2.csv`, ...); comparison CSV summary gains a `platform` column
+- Version is now embedded at build time (Taskfile reads changelog.md) or from `go install` build info instead of a hardcoded constant
+- Upgraded go-containerregistry to v0.22.1 and go-sqlite to v1.23.0
+- Added unit tests (parsers, CLI, cache, overlay semantics) and `task check`/`task install`/`task deps`; `task lint` now fails on findings and `task release` runs all checks first
+- Removed GoReleaser, Homebrew formula, and curl install script: pkgpulse is now distributed as source only (`go install`)
+- Stopped tracking `pkgpulse.csv` and `.DS_Store`
+
 # 0.12.5 - Update: Streamline README
 - Rewrote README for clarity: added Quick Start, condensed sections
 - Moved registry list into collapsible details block
